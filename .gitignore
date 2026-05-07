@@ -216,3 +216,76 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+
+
+
+####   ML specific added ####
+# -------------------------
+# Python
+# -------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# -------------------------
+# Virtual Environments
+# -------------------------
+odvenv/
+.env/
+
+# -------------------------
+# Datasets
+# -------------------------
+data/
+datasets/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# -------------------------
+# Model weights / checkpoints
+# -------------------------
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+checkpoints/
+weights/
+
+# -------------------------
+# Training outputs
+# -------------------------
+runs/
+logs/
+outputs/
+results/
+events.out.tfevents.*
+
+# -------------------------
+# Experiment tracking
+# -------------------------
+mlruns/
+wandb/
+
+# -------------------------
+# Cache
+# -------------------------
+.cache/
+*.cache
+
+# -------------------------
+# Intermediate files
+# -------------------------
+*.pkl
+annotations_converted/
+
+# -------------------------
+# OS / misc
+# -------------------------
+.DS_Store
+Thumbs.db
