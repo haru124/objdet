@@ -1,0 +1,48 @@
+# Base configuration for Faster R-CNN on Cityscapes
+# Override values using experiment configs under config/experiments/
+
+project_name: faster_rcnn_cityscapes
+experiment_name: baseline
+
+data:
+  root: data/                        # Project root for data
+  images_dir: data/Images
+  annotations_dir: data/gtFine
+  num_workers: 4                    # DataLoader(read img, decode, resize, augment, convert to tensors batchwise) workers for parallel loading ~ no of CPU cores else GPU may starve for data
+  pin_memory: true                  # Speeds up data loading on GPU; Speeds up transfer from CPU RAM → GPU VRAM.
+
+model:
+  num_classes: 9                     # 8 Cityscapes classes + background
+  pretrained_backbone: true
+  trainable_backbone_layers: 3       # How many ResNet layers to fine-tune (0-5) 0 - freeze all, 1 - fine-tune last layer, 2 - fine-tune last 2 layers 5 - fine-tune all
+  #layer in resnest have 3 to 6 bottleneck blocks - each block has 3 conv layers, so 3 layers in resnet have (3 or 6)*3=9 to 18 conv layers
+  min_size: 800                     # Shortest side of the image after resizing, retains aspect ratio
+  max_size: 1333                    # Longest side of the image after resizing, retains aspect ratio
+
+training:
+  epochs: 20
+  batch_size: 2                      # Faster R-CNN is memory-heavy; keep small
+  learning_rate: 0.005
+  momentum: 0.9                      # Momentum for SGD optimizer wt = wt-1 + lr*momentum, momentum vt = bvt-1 + gt
+  weight_decay: 0.0005        # wt = wt - lr*weight_decay*wt -- creates same effect as L2 regularization in SGD to prevent overfitting, so no need to add L2 regularization term in loss function
+  lr_step_size: 7                    # StepLR: decay every N epochs
+  lr_gamma: 0.1            # StepLR: decay factor (new_lr = old_lr * gamma)-- after 7 epochs, lr = lr*0.1, after 7 epochs, lrnew = lr*0.1
+  grad_clip: null                    # Optional gradient clipping value, when grad norm exceeds this value, it is scaled down to prevent exploding gradients, all gradients will be scaled down by the same factor(grad norm/clip_value) to maintain their relative magnitudes
+  device: cuda                       # "cuda" or "cpu"
+
+checkpointing:
+  save_dir: outputs/checkpoints/
+  save_every: 2                      # Save checkpoint every N epochs
+  keep_last: 3                       # How many checkpoints to retain
+
+logging:
+  tensorboard_dir: outputs/tensorboard/
+  mlflow_tracking_uri: outputs/mlruns/
+  log_every: 50                      # Log metrics every N batches
+
+profiler:
+  enabled: false
+  wait: 1         # Number of epochs to wait before starting profiling (warmup)
+  warmup: 1       # Number of epochs to perform warmup (profiling without recording results)
+  active: 3       # Number of epochs to profile (record results)
+  output_dir: outputs/profiler
