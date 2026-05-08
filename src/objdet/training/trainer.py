@@ -19,11 +19,11 @@ from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader
 
-from ods.entity.config_entity import TrainingPipelineConfig
-from ods.evaluation.metrics import COCOEvaluator
-from ods.tracking.tensorboard_logger import TensorBoardLogger
-from ods.tracking.mlflow_logger import MLflowLogger
-from ods.utils.checkpoint import save_checkpoint, load_checkpoint, cleanup_old_checkpoints
+from objdet.entity.config_entity import TrainingPipelineConfig
+from objdet.evaluation.metrics import COCOEvaluator
+from objdet.tracking.tensorboard_logger import TensorBoardLogger
+from objdet.tracking.mlflow_logger import MLflowLogger
+from objdet.utils.checkpoint import save_checkpoint, load_checkpoint, cleanup_old_checkpoints
 
 
 class Trainer:

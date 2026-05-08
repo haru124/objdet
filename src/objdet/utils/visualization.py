@@ -13,7 +13,7 @@ import matplotlib.patches as patches
 import torch
 from PIL import Image
 
-from ods.constants import CITYSCAPES_CLASSES
+from objdet.constants import CITYSCAPES_CLASSES
 
 
 def draw_boxes(
