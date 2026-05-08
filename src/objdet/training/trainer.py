@@ -2,12 +2,12 @@
 training/trainer.py
 
 Main training and validation loops.
-
-Design:
-  - Trainer is a simple class (not a framework) — easy to read and debug.
-  - Faster R-CNN returns a loss dict during training; we sum the losses.
-  - Validation uses torchmetrics / pycocotools via the metrics module.
-  - Profiler integration is optional via context-manager injection.
+Now supports:
+  - Configurable optimizer: SGD | Adam | AdamW
+  - Configurable LR scheduler: StepLR | CosineAnnealingLR | none
+  - Configurable losses via losses.py patching
+  - Experiment-isolated checkpoint paths
+  - Improved checkpoint naming with epoch + loss
 """
 
 import time
@@ -15,28 +15,116 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from torch.optim import SGD
-from torch.optim.lr_scheduler import StepLR
+from torch.optim import SGD, Adam, AdamW
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from objdet.entity.config_entity import TrainingPipelineConfig
 from objdet.evaluation.metrics import COCOEvaluator
 from objdet.tracking.tensorboard_logger import TensorBoardLogger
 from objdet.tracking.mlflow_logger import MLflowLogger
-from objdet.utils.checkpoint import save_checkpoint, load_checkpoint, cleanup_old_checkpoints
+from objdet.utils.checkpoint import (
+    save_checkpoint, load_checkpoint,
+    cleanup_old_checkpoints,
+)
+
+
+def build_optimizer(model, training_cfg):
+    """
+    Factory for optimizer construction.
+    Only parameters with requires_grad=True are passed to the optimizer.
+    This respects the backbone freeze settings applied by build_backbone().
+
+    SGD  : standard Faster R-CNN default, needs momentum tuning
+    Adam : adaptive LR, good for fine-tuning, lower lr needed (~1e-4)
+    AdamW: Adam + decoupled weight decay, state-of-the-art for fine-tuning
+    """
+    params = [p for p in model.parameters() if p.requires_grad]
+    name = training_cfg.optimizer.lower()
+
+    if name == "sgd":
+        optimizer = SGD(
+            params,
+            lr=training_cfg.learning_rate,
+            momentum=training_cfg.momentum,
+            weight_decay=training_cfg.weight_decay,
+        )
+    elif name == "adam":
+        optimizer = Adam(
+            params,
+            lr=training_cfg.learning_rate,
+            weight_decay=training_cfg.weight_decay,
+        )
+    elif name == "adamw":
+        optimizer = AdamW(
+            params,
+            lr=training_cfg.learning_rate,
+            weight_decay=training_cfg.weight_decay,
+        )
+    else:
+        raise ValueError(
+            f"Unknown optimizer: '{name}'. Choose: 'sgd' | 'adam' | 'adamw'."
+        )
+
+    print(
+        f"[Optimizer] {name.upper()} | lr={training_cfg.learning_rate} | "
+        f"wd={training_cfg.weight_decay} | "
+        f"trainable params={sum(p.numel() for p in params):,}"
+    )
+    return optimizer
+
+
+def build_scheduler(optimizer, training_cfg):
+    """
+    Factory for LR scheduler construction.
+
+    StepLR   : decay by gamma every lr_step_size epochs (original Faster R-CNN)
+    Cosine   : smooth cosine annealing over all epochs (better for AdamW)
+    none     : constant learning rate
+    """
+    name = training_cfg.lr_scheduler.lower()
+
+    if name == "step":
+        scheduler = StepLR(
+            optimizer,
+            step_size=training_cfg.lr_step_size,
+            gamma=training_cfg.lr_gamma,
+        )
+        print(
+            f"[Scheduler] StepLR | step={training_cfg.lr_step_size} | "
+            f"gamma={training_cfg.lr_gamma}"
+        )
+
+    elif name == "cosine":
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=training_cfg.epochs,
+            eta_min=training_cfg.learning_rate * 0.01,  # min lr = 1% of initial
+        )
+        print(f"[Scheduler] CosineAnnealingLR | T_max={training_cfg.epochs}")
+
+    elif name == "none":
+        # ConstantLR with factor=1 is effectively no scheduling
+        from torch.optim.lr_scheduler import ConstantLR
+        scheduler = ConstantLR(optimizer, factor=1.0, total_iters=0)
+        print("[Scheduler] No LR scheduling (constant LR).")
+
+    else:
+        raise ValueError(
+            f"Unknown lr_scheduler: '{name}'. Choose: 'step' | 'cosine' | 'none'."
+        )
+
+    return scheduler
 
 
 class Trainer:
     """
     Encapsulates the training loop for Faster R-CNN.
 
-    Args:
-        model:       The Faster R-CNN model.
-        train_loader, val_loader: DataLoaders (use custom collate_fn).
-        cfg:         Full pipeline config.
-        tb_logger:   TensorBoard logger (optional).
-        mlf_logger:  MLflow logger (optional).
-        profiler:    torch.profiler.profile context (optional, set externally).
+    Checkpoints are saved under:
+        {save_dir}/{experiment_name}/checkpoint_{experiment_name}_epoch_{N:04d}_loss_{L:.4f}.pth
+
+    This isolates outputs per experiment automatically.
     """
 
     def __init__(
@@ -60,25 +148,19 @@ class Trainer:
         )
         self.model.to(self.device)
 
-        # Only optimise parameters that require gradients
-        params = [p for p in model.parameters() if p.requires_grad]
-        self.optimizer = SGD(
-            params,
-            lr=cfg.training.learning_rate,
-            momentum=cfg.training.momentum,
-            weight_decay=cfg.training.weight_decay,
-        )
-        self.scheduler = StepLR(
-            self.optimizer,
-            step_size=cfg.training.lr_step_size,
-            gamma=cfg.training.lr_gamma,
-        )
+        self.optimizer = build_optimizer(model, cfg.training)
+        self.scheduler = build_scheduler(self.optimizer, cfg.training)
 
         self.start_epoch = 0
         self.global_step = 0
 
-        # Create checkpoint directory
-        Path(cfg.checkpointing.save_dir).mkdir(parents=True, exist_ok=True)
+        # Experiment-isolated checkpoint directory:
+        # outputs/checkpoints/exp_01_smoke_test/
+        self.ckpt_dir = (
+            Path(cfg.checkpointing.save_dir) / cfg.experiment_name
+        )
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[Trainer] Checkpoints will be saved to: {self.ckpt_dir}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,14 +180,14 @@ class Trainer:
 
             train_loss = self._train_one_epoch(epoch)
             val_metrics = self._validate(epoch)
-
             self.scheduler.step()
 
-            # --- Logging ---
-            lr = self.scheduler.get_last_lr()[0]
+            lr = self.optimizer.param_groups[0]["lr"]
             print(
-                f"[Epoch {epoch+1}] train_loss={train_loss:.4f}  "
-                f"mAP={val_metrics.get('map', 0.0):.4f}  lr={lr:.6f}"
+                f"[Epoch {epoch+1}] train_loss={train_loss:.4f} "
+                f"mAP={val_metrics.get('map', 0.0):.4f} "
+                f"mAP@50={val_metrics.get('map_50', 0.0):.4f} "
+                f"lr={lr:.6f}"
             )
 
             if self.tb_logger:
@@ -116,20 +198,23 @@ class Trainer:
 
             if self.mlf_logger:
                 self.mlf_logger.log_metrics(
-                    {"train_loss": train_loss, "lr": lr, **val_metrics}, step=epoch
+                    {"train_loss": train_loss, "lr": lr, **val_metrics},
+                    step=epoch,
                 )
 
             # --- Checkpointing ---
             if (epoch + 1) % self.cfg.checkpointing.save_every == 0:
-                ckpt_path = save_checkpoint(
+                save_checkpoint(
                     model=self.model,
                     optimizer=self.optimizer,
                     scheduler=self.scheduler,
                     epoch=epoch + 1,
-                    save_dir=Path(self.cfg.checkpointing.save_dir),
+                    loss=train_loss,
+                    experiment_name=self.cfg.experiment_name,
+                    save_dir=self.ckpt_dir,
                 )
                 cleanup_old_checkpoints(
-                    Path(self.cfg.checkpointing.save_dir),
+                    self.ckpt_dir,
                     keep=self.cfg.checkpointing.keep_last,
                 )
 
@@ -140,7 +225,7 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def _train_one_epoch(self, epoch: int) -> float:
-        """Run one epoch of training; return mean total loss."""
+        """Run one epoch; return mean total loss."""
         self.model.train()
         total_loss = 0.0
         log_every = self.cfg.logging.log_every
@@ -148,18 +233,21 @@ class Trainer:
 
         for batch_idx, (images, targets) in enumerate(self.train_loader):
             images = [img.to(self.device) for img in images]
-            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+            targets = [
+                {k: v.to(self.device) for k, v in t.items()}
+                for t in targets
+            ]
 
-            # Faster R-CNN returns a dict of losses in train mode
+            # Faster R-CNN returns a dict of losses in train mode:
+            # {loss_classifier, loss_box_reg, loss_objectness, loss_rpn_box_reg}
+            # If losses have been patched via patch_roi_head_losses(),
+            # loss_classifier and loss_box_reg use our custom functions.
             loss_dict = self.model(images, targets)
-
-            # Sum individual losses: classifier, box_reg, objectness, rpn_box_reg
             losses = sum(loss for loss in loss_dict.values())
 
             self.optimizer.zero_grad()
             losses.backward()
 
-            # Optional gradient clipping
             if self.cfg.training.grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.cfg.training.grad_clip
@@ -171,15 +259,19 @@ class Trainer:
             total_loss += loss_val
             self.global_step += 1
 
-            # Periodic batch-level logging
             if (batch_idx + 1) % log_every == 0:
                 elapsed = time.time() - t0
                 print(
-                    f"  [{batch_idx+1}/{len(self.train_loader)}]  "
-                    f"loss={loss_val:.4f}  ({elapsed:.1f}s)"
+                    f"  [{batch_idx+1}/{len(self.train_loader)}] "
+                    f"loss={loss_val:.4f} "
+                    f"(cls={loss_dict.get('loss_classifier', torch.tensor(0)).item():.4f} "
+                    f"box={loss_dict.get('loss_box_reg', torch.tensor(0)).item():.4f} "
+                    f"obj={loss_dict.get('loss_objectness', torch.tensor(0)).item():.4f} "
+                    f"rpn_box={loss_dict.get('loss_rpn_box_reg', torch.tensor(0)).item():.4f}) "
+                    f"[{elapsed:.1f}s]"
                 )
                 if self.tb_logger:
-                    self.tb_logger.log_scalar("train/loss", loss_val, self.global_step)
+                    self.tb_logger.log_scalar("train/total_loss", loss_val, self.global_step)
                     for k, v in loss_dict.items():
                         self.tb_logger.log_scalar(f"train/{k}", v.item(), self.global_step)
 
@@ -187,7 +279,6 @@ class Trainer:
 
     def _validate(self, epoch: int) -> dict:
         """Run evaluation on the validation set; return metric dict."""
-        evaluator = COCOEvaluator(self.device)
+        evaluator = COCOEvaluator(self.device, self.cfg.eval)
         evaluator.evaluate(self.model, self.val_loader)
-        metrics = evaluator.get_metrics()
-        return metrics
+        return evaluator.get_metrics()

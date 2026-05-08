@@ -1,0 +1,26 @@
+# =============================================================================
+# Experiment 01 — Quick smoke-test
+# Overrides only what differs from config.yaml
+# =============================================================================
+experiment_name: exp_01_smoke_test
+
+training:
+  epochs: 1
+  batch_size: 1
+  optimizer: "sgd"
+  learning_rate: 0.002
+
+model:
+  backbone_weights: "local"
+  local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
+  trainable_backbone_layers: 1    # freeze more layers for faster iteration
+
+loss:
+  classification: "cross_entropy"
+  box_regression: "smooth_l1"
+
+logging:
+  log_every: 100
+
+debug:
+  enabled: false    # print tensor shapes at each stage before training

@@ -1,0 +1,28 @@
+# =============================================================================
+# Experiment 02 — Focal loss + GIoU box regression
+# =============================================================================
+experiment_name: exp_02_focal_giou
+
+training:
+  epochs: 20
+  batch_size: 2
+  optimizer: "adamw"
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  lr_scheduler: "cosine"
+  momentum: 0.0              # not used by AdamW, but set explicitly for clarity
+
+model:
+  backbone_weights: "local"
+  local_weights_path: "weights/fasterrcnn_resnet50_fpn_v2_coco.pth"
+  trainable_backbone_layers: 3
+
+loss:
+  classification: "focal"
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  box_regression: "giou"
+
+eval:
+  iou_thresholds: [0.5, 0.75]
+  score_threshold: 0.05

@@ -1,28 +1,16 @@
-#@staticmethod = a function inside a class that does NOT use class or object state, but is grouped there for organization.
-"""
-config/configuration.py
-
-Loads config.yaml (base) then deep-merges an optional experiment YAML on top.
-Returns a fully populated TrainingPipelineConfig dataclass.
-
-Usage:
-    cfg = ConfigurationManager("config/config.yaml",
-                               "config/experiments/exp_01.yaml").get_config()
-"""
-
 from pathlib import Path
 from typing import Optional
 import yaml
 
 from objdet.entity.config_entity import (
-    DataConfig, ModelConfig, TrainingConfig,
-    CheckpointingConfig, LoggingConfig, ProfilerConfig,
+    DataConfig, ModelConfig, TrainingConfig, LossConfig, EvalConfig,
+    CheckpointingConfig, LoggingConfig, ProfilerConfig, DebugConfig,
     TrainingPipelineConfig,
 )
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
-    """Recursively merge *override* into *base* (override wins on conflicts)."""
+    """Recursively merge *override* into *base*. Override wins on conflict."""
     result = base.copy()
     for key, val in override.items():
         if key in result and isinstance(result[key], dict) and isinstance(val, dict):
@@ -38,31 +26,20 @@ def _load_yaml(path: Path) -> dict:
 
 
 class ConfigurationManager:
-    """
-    Reads YAML configs and maps them to typed dataclasses.
-
-    Args:
-        base_config_path:    Path to config/config.yaml
-        experiment_config_path: Optional path to an experiment override YAML
-    """
-
     def __init__(
         self,
         base_config_path: str | Path = "config/config.yaml",
         experiment_config_path: Optional[str | Path] = None,
     ):
         raw = _load_yaml(Path(base_config_path))
-
         if experiment_config_path is not None:
             exp_raw = _load_yaml(Path(experiment_config_path))
             raw = _deep_merge(raw, exp_raw)
-
         self._raw = raw
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
     def get_config(self) -> TrainingPipelineConfig:
         r = self._raw
         return TrainingPipelineConfig(
@@ -71,31 +48,34 @@ class ConfigurationManager:
             data=self._data_config(r.get("data", {})),
             model=self._model_config(r.get("model", {})),
             training=self._training_config(r.get("training", {})),
+            loss=self._loss_config(r.get("loss", {})),
+            eval=self._eval_config(r.get("eval", {})),
             checkpointing=self._checkpointing_config(r.get("checkpointing", {})),
             logging=self._logging_config(r.get("logging", {})),
             profiler=self._profiler_config(r.get("profiler", {})),
+            debug=self._debug_config(r.get("debug", {})),
         )
 
     # ------------------------------------------------------------------
-    # Private helpers — one per sub-config section
+    # Private helpers
     # ------------------------------------------------------------------
-
     @staticmethod
     def _data_config(d: dict) -> DataConfig:
-        cfg = DataConfig(
+        return DataConfig(
             root=d.get("root", "data/"),
             images_dir=d.get("images_dir", "data/Images"),
             annotations_dir=d.get("annotations_dir", "data/gtFine"),
             num_workers=d.get("num_workers", 4),
             pin_memory=d.get("pin_memory", True),
         )
-        return cfg
 
     @staticmethod
     def _model_config(d: dict) -> ModelConfig:
         return ModelConfig(
             num_classes=d.get("num_classes", 9),
-            pretrained_backbone=d.get("pretrained_backbone", True),
+            backbone_weights=d.get("backbone_weights", "imagenet"),
+            local_weights_path=d.get("local_weights_path", None),
+            load_backbone_only=d.get("load_backbone_only", False),
             trainable_backbone_layers=d.get("trainable_backbone_layers", 3),
             min_size=d.get("min_size", 800),
             max_size=d.get("max_size", 1333),
@@ -106,9 +86,11 @@ class ConfigurationManager:
         return TrainingConfig(
             epochs=d.get("epochs", 20),
             batch_size=d.get("batch_size", 2),
+            optimizer=d.get("optimizer", "sgd"),
             learning_rate=d.get("learning_rate", 0.005),
             momentum=d.get("momentum", 0.9),
             weight_decay=d.get("weight_decay", 0.0005),
+            lr_scheduler=d.get("lr_scheduler", "step"),
             lr_step_size=d.get("lr_step_size", 7),
             lr_gamma=d.get("lr_gamma", 0.1),
             grad_clip=d.get("grad_clip", None),
@@ -116,9 +98,29 @@ class ConfigurationManager:
         )
 
     @staticmethod
+    def _loss_config(d: dict) -> LossConfig:
+        return LossConfig(
+            classification=d.get("classification", "cross_entropy"),
+            box_regression=d.get("box_regression", "smooth_l1"),
+            focal_alpha=d.get("focal_alpha", 0.25),
+            focal_gamma=d.get("focal_gamma", 2.0),
+            smooth_l1_beta=d.get("smooth_l1_beta", 1.0),
+        )
+
+    @staticmethod
+    def _eval_config(d: dict) -> EvalConfig:
+        return EvalConfig(
+            iou_thresholds=d.get(
+                "iou_thresholds", [0.5 + 0.05 * i for i in range(10)]
+            ),
+            score_threshold=d.get("score_threshold", 0.05),
+            max_detections=d.get("max_detections", 100),
+        )
+
+    @staticmethod
     def _checkpointing_config(d: dict) -> CheckpointingConfig:
         return CheckpointingConfig(
-            save_dir=d.get("save_dir", "checkpoints/"),
+            save_dir=d.get("save_dir", "outputs/checkpoints/"),
             save_every=d.get("save_every", 2),
             keep_last=d.get("keep_last", 3),
         )
@@ -126,8 +128,8 @@ class ConfigurationManager:
     @staticmethod
     def _logging_config(d: dict) -> LoggingConfig:
         return LoggingConfig(
-            tensorboard_dir=d.get("tensorboard_dir", "runs/"),
-            mlflow_tracking_uri=d.get("mlflow_tracking_uri", "mlruns/"),
+            tensorboard_dir=d.get("tensorboard_dir", "outputs/tensorboard/"),
+            mlflow_tracking_uri=d.get("mlflow_tracking_uri", "outputs/mlruns/"),
             log_every=d.get("log_every", 50),
         )
 
@@ -138,5 +140,14 @@ class ConfigurationManager:
             wait=d.get("wait", 1),
             warmup=d.get("warmup", 1),
             active=d.get("active", 3),
-            output_dir=d.get("output_dir", "profiler_output/"),
+            output_dir=d.get("output_dir", "outputs/profiler/"),
+        )
+
+    @staticmethod
+    def _debug_config(d: dict) -> DebugConfig:
+        return DebugConfig(
+            enabled=d.get("enabled", False),
+            image_height=d.get("image_height", 600),
+            image_width=d.get("image_width", 800),
+            batch_size=d.get("batch_size", 2),
         )

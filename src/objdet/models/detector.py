@@ -1,60 +1,78 @@
 """
 models/detector.py
 
-Builds a Faster R-CNN detector with a ResNet-50 FPN backbone.
+Builds the full Faster R-CNN detector using torchvision's factory function.
+The box predictor head is always replaced to match num_classes.
 
-We use the high-level torchvision factory `fasterrcnn_resnet50_fpn` and then
-replace the box predictor head to match the desired number of classes.
-
-This is the recommended approach from the torchvision docs:
-  https://pytorch.org/vision/stable/models/faster_rcnn.html
+Weight loading is handled via backbone.py's build_backbone().
+The detector assembles: backbone → RPN → ROI heads using torchvision internals.
 """
 
 import torch
 import torch.nn as nn
 from torchvision.models.detection import fasterrcnn_resnet50_fpn, FasterRCNN
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
 
 from objdet.entity.config_entity import ModelConfig
+from objdet.models.backbone import build_backbone
 
 
 def build_faster_rcnn(model_cfg: ModelConfig) -> FasterRCNN:
     """
-    Build and return a Faster R-CNN model configured for *num_classes*.
+    Build a Faster R-CNN model with:
+      - backbone loaded per model_cfg.backbone_weights strategy
+      - RPN and ROI heads from torchvision (unchanged)
+      - box predictor replaced to match model_cfg.num_classes
 
-    Steps:
-      1. Load the pretrained model (backbone + RPN + RoI head).
-      2. Replace the box classifier head (FastRCNNPredictor) so the output
-         dimension matches our class count.
+    Strategy for assembling:
+      1. Build backbone (with weights) via backbone.py
+      2. Use fasterrcnn_resnet50_fpn(weights=None, backbone=...) to build the
+         full model shell with our custom backbone
+      3. Swap the box predictor head for the correct num_classes
 
-    Args:
-        model_cfg: ModelConfig with num_classes and pretrained flags.
-
-    Returns:
-        A FasterRCNN nn.Module ready for training or inference.
+    Note on torchvision API:
+      fasterrcnn_resnet50_fpn() accepts a backbone kwarg in recent torchvision.
+      If your version doesn't support it, we use the weights=None path and
+      manually replace the backbone after construction.
     """
-    # Step 1 — load official pretrained model
-    weights = (
-        FasterRCNN_ResNet50_FPN_Weights.DEFAULT
-        if model_cfg.pretrained_backbone
-        else None
-    )
 
-    model = fasterrcnn_resnet50_fpn(
-        weights=weights,
-        # These control the built-in image resize/normalisation transform
-        min_size=model_cfg.min_size,
-        max_size=model_cfg.max_size,
-        trainable_backbone_layers=model_cfg.trainable_backbone_layers,
-    )
+    # Step 1 — Build backbone with desired weights
+    backbone = build_backbone(model_cfg)
 
-    # Step 2 — swap the box predictor head
-    # roi_heads.box_predictor is a FastRCNNPredictor(in_features, 91)
-    # We replace it with one sized for our dataset.
+    # Step 2 — Build full model shell around our backbone
+    # We pass weights=None because our backbone already has weights loaded.
+    # min_size/max_size control GeneralizedRCNNTransform (image resize).
+    try:
+        # Newer torchvision (>=0.13) supports passing backbone directly
+        model = fasterrcnn_resnet50_fpn(
+            weights=None,
+            backbone=backbone,
+            num_classes=91,          # temporarily 91 (COCO), replaced below
+            min_size=model_cfg.min_size,
+            max_size=model_cfg.max_size,
+        )
+    except TypeError:
+        # Older torchvision: build with None weights, then replace backbone
+        model = fasterrcnn_resnet50_fpn(
+            weights=None,
+            weights_backbone=None,
+            min_size=model_cfg.min_size,
+            max_size=model_cfg.max_size,
+            trainable_backbone_layers=model_cfg.trainable_backbone_layers,
+        )
+        model.backbone = backbone
+        print("[Detector] Replaced model.backbone with custom-loaded backbone.")
+
+    # Step 3 — Replace box predictor head
+    # roi_heads.box_predictor is FastRCNNPredictor(in_features=1024, num_classes=91)
+    # We replace it with one sized for our dataset (e.g. 9 for Cityscapes).
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(
         in_features, model_cfg.num_classes
+    )
+    print(
+        f"[Detector] Box predictor replaced: "
+        f"in_features={in_features}, num_classes={model_cfg.num_classes}"
     )
 
     return model
@@ -65,3 +83,35 @@ def get_model_on_device(model_cfg: ModelConfig, device: torch.device) -> FasterR
     model = build_faster_rcnn(model_cfg)
     model.to(device)
     return model
+
+
+def debug_detector(
+    image_height: int = 600,
+    image_width: int = 800,
+    batch_size: int = 2,
+):
+    """
+    End-to-end forward pass debug.
+    Runs the full model on dummy data and prints shapes at every stage
+    by calling debug_backbone, debug_fpn, debug_rpn, debug_roi_heads.
+    No training, no dataset required.
+    """
+    from objdet.models.backbone import debug_backbone
+    from objdet.models.fpn import debug_fpn
+    from objdet.models.rpn import debug_rpn
+    from objdet.models.roi_heads import debug_roi_heads
+
+    h, w, b = image_height, image_width, batch_size
+
+    print("\n" + "#"*60)
+    print("# FULL DETECTOR DEBUG — tensor flow at each stage")
+    print("#"*60)
+
+    debug_backbone(h, w, b)
+    debug_fpn(h, w, b)
+    debug_rpn(h, w, b)
+    debug_roi_heads(h, w, b)
+
+    print("#"*60)
+    print("# FULL DETECTOR DEBUG COMPLETE")
+    print("#"*60 + "\n")
