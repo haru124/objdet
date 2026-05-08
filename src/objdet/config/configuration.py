@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 import yaml
 
-from ods.entity.config_entity import (
+from objdet.entity.config_entity import (
     DataConfig, ModelConfig, TrainingConfig,
     CheckpointingConfig, LoggingConfig, ProfilerConfig,
     TrainingPipelineConfig,
