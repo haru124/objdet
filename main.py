@@ -42,7 +42,7 @@ from objdet.tracking.tensorboard_logger import TensorBoardLogger
 from objdet.tracking.mlflow_logger import MLflowLogger
 from objdet.utils.common import set_seed, get_device, count_parameters, flat_config_dict
 from objdet.utils.checkpoint import get_latest_checkpoint, load_checkpoint
-#from objdet.profiler.profiler_utils import build_profiler
+from objdet.profiler.profiler_utils import build_profiler
 
 
 def parse_args():

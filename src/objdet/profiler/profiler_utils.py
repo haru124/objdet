@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 import torch.profiler as profiler
 
-from ods.entity.config_entity import ProfilerConfig
+from objdet.entity.config_entity import ProfilerConfig
 
 
 def build_profiler(prof_cfg: ProfilerConfig):

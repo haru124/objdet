@@ -16,7 +16,7 @@ from torchvision.models.detection import fasterrcnn_resnet50_fpn, FasterRCNN
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
 
-from ods.entity.config_entity import ModelConfig
+from objdet.entity.config_entity import ModelConfig
 
 
 def build_faster_rcnn(model_cfg: ModelConfig) -> FasterRCNN:
