@@ -9,7 +9,7 @@ from typing import Optional, List
 @dataclass
 class DataConfig:
     root: str = "data/"
-    images_dir: str = "data/Images"
+    images_dir: str = "data/images"
     annotations_dir: str = "data/gtFine"
     num_workers: int = 4
     pin_memory: bool = True
