@@ -31,9 +31,9 @@ class COCOEvaluator:
                 for target, output in zip(targets, outputs):
                     img_id = target["image_id"].item()
                     # Filter low-confidence predictions per eval config
-                    keep = output["scores"] >= self.eval_cfg.score_threshold
+                    keep = output["scores"] >= self.eval_cfg.score_threshold #boolean tensor indicating which predictions to keep based on score threshold
                     # Limit max detections per image
-                    keep_indices = keep.nonzero(as_tuple=True)[0]
+                    keep_indices = keep.nonzero(as_tuple=True)[0] #keep is a boolean tensor, keep.nonzero() gives indices where it's True, as a 1D tensor, [0] to get the tensor of indices from the tuple
                     keep_indices = keep_indices[:self.eval_cfg.max_detections]
 
                     self._ground_truths.append({
@@ -65,7 +65,7 @@ class COCOEvaluator:
         # mAP@50 and mAP@75 — find by threshold value, not index
         def _ap_at(target_thresh):
             for t, ap in zip(thresholds, ap_per_thresh):
-                if abs(t - target_thresh) < 1e-4:
+                if abs(t - target_thresh) < 1e-4: #find the AP corresponding to the target IoU threshold (e.g., 0.50 or 0.75)
                     return ap
             return 0.0
 
@@ -79,7 +79,9 @@ class COCOEvaluator:
     # (kept here for completeness in your file)
     def _mean_ap_at_iou(self, iou_threshold: float) -> float:
         from collections import defaultdict
-        class_preds: dict[int, list] = defaultdict(list)
+        class_preds: dict[int, list] = defaultdict(list) 
+        #dict[int, list] means a dictionary where keys are integers (class labels) and values are lists of tuples (score, tp). 
+        # defaultdict(list) means that if we access a key that doesn't exist, it will return an empty list instead of raising a KeyError.
         class_n_gt: dict[int, int] = defaultdict(int)
 
         for gt, pred in zip(self._ground_truths, self._predictions):
@@ -89,8 +91,8 @@ class COCOEvaluator:
             pred_labels = pred["labels"]
             pred_scores = pred["scores"]
 
-            for lbl in gt_labels.tolist():
-                class_n_gt[lbl] += 1
+            for lbl in gt_labels.tolist(): #.tolist() converts the tensor of labels to a regular Python list, so we can iterate over it.
+                class_n_gt[lbl] += 1 #count the number of ground truth instances for each class label across the dataset, storing it in class_n_gt.
 
             if len(pred_scores) == 0:
                 continue
@@ -102,7 +104,7 @@ class COCOEvaluator:
 
             matched_gt = set()
             for pb, pl, ps in zip(pred_boxes, pred_labels.tolist(), pred_scores.tolist()):
-                same_cls = (gt_labels == pl).nonzero(as_tuple=True)[0]
+                same_cls = (gt_labels == pl).nonzero(as_tuple=True)[0] #find indices of gt boxes that have the same class label as the current prediction (pl).
                 best_iou, best_idx = 0.0, -1
                 for gi in same_cls.tolist():
                     if gi in matched_gt:
@@ -116,11 +118,11 @@ class COCOEvaluator:
                 class_preds[pl].append((ps, tp))
 
         aps = []
-        for cls, preds_list in class_preds.items():
-            n_gt = class_n_gt.get(cls, 0)
+        for cls, preds_list in class_preds.items(): #iterate over each class and its list of predictions (score, tp)
+            n_gt = class_n_gt.get(cls, 0) #number of ground truth instances for this class, default to 0 if not found
             if n_gt == 0:
                 continue
-            preds_list.sort(key=lambda x: -x[0])
+            preds_list.sort(key=lambda x: -x[0]) #preds_list is a list of tuples (score, tp), we sort it in descending order of score (x[0] is the score, -x[0] for descending)
             tp_cum = fp_cum = 0
             precisions, recalls = [], []
             for _, tp in preds_list:
@@ -147,9 +149,9 @@ def _box_iou_single(box_a, box_b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _voc_ap(precisions, recalls) -> float:
+def _voc_ap(precisions, recalls) -> float: #compute Average Precision using the 11-point interpolation method
     ap = 0.0
-    for t in [i / 10.0 for i in range(11)]:
+    for t in [i / 10.0 for i in range(11)]: #t takes values 0.0, 0.1, ..., 1.0
         p_at_t = [p for p, r in zip(precisions, recalls) if r >= t]
         ap += max(p_at_t) if p_at_t else 0.0
     return ap / 11.0

@@ -32,9 +32,11 @@ RPNHead (shared 3×3 conv across all levels):
         ↓
 AnchorGenerator → anchor boxes in image coordinates
         ↓
-box_coder.decode(deltas, anchors) → proposal boxes
+box_coder.decode(deltas, anchors) → proposal boxes 
         ↓
-clip_boxes_to_image + filter_small_boxes + NMS
+clip_boxes_to_image + filter_small_boxes + NMS 
+#clip_boxes_to_image ensures proposals are within image boundaries.
+#filter_small_boxes removes proposals smaller than min_size.
         ↓
 proposals: list of [N_i, 4]  (N_i proposals per image, variable)
 """
@@ -73,7 +75,7 @@ def debug_rpn(
     from objdet.models.detector import build_faster_rcnn
 
     print("\n" + "="*60)
-    print("DEBUG: RPN tensor flow")
+    print("DEBUG: RPN tensor flow, file: rpn.py")
     print("="*60)
 
     cfg = ModelConfig(backbone_weights="none", num_classes=9)
@@ -101,7 +103,7 @@ def debug_rpn(
         torch.rand(3, image_height, image_width)
         for _ in range(batch_size)
     ]
-    print(f"\nInput: {batch_size} images of shape [3, {image_height}, {image_width}]")
+    print(f"\nInput: {batch_size} images of shape [3, {image_height}, {image_width}], file: rpn.py")
 
     with torch.no_grad():
         # In eval mode, model() returns predictions (boxes, labels, scores)
@@ -111,24 +113,24 @@ def debug_rpn(
     hook.remove()
 
     # RPN head outputs (one tensor per FPN level)
-    print("\nRPN Head outputs per FPN level:")
+    print("\nfile: rpn.py - RPN Head outputs per FPN level:")
     for i, (logits, deltas) in enumerate(zip(
         rpn_hook_data["objectness_logits"],
         rpn_hook_data["bbox_deltas"],
     )):
         print(f"  FPN level {i}:")
-        print(f"    objectness logits : {list(logits.shape)}")
+        print(f"    objectness logits : {list(logits.shape)}, file: rpn.py")
         #   [B, 3, Hi, Wi]  — 3 anchors per location, 1 score each
-        print(f"    bbox deltas       : {list(deltas.shape)}")
+        print(f"    bbox deltas       : {list(deltas.shape)}, file: rpn.py")
         #   [B, 12, Hi, Wi] — 3 anchors × 4 (dx,dy,dw,dh) deltas
 
-    print(f"\nProposals after NMS (eval mode, per image):")
+    print(f"\n file: rpn.py - Proposals after NMS (eval mode, per image):")
     # In eval mode, predictions contain final detections (post-ROI-heads).
     # To see raw RPN proposals we'd need another hook on rpn.forward.
     # Here we report final detection counts as a proxy.
     for i, pred in enumerate(predictions):
         print(f"  Image {i}: {len(pred['boxes'])} final detections "
-              f"(post ROI-heads, score > 0.05)")
+              f"(post ROI-heads, score > 0.05), file: rpn.py")
 
     print("="*60 + "\n")
     return rpn_hook_data, predictions

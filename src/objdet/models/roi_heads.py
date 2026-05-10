@@ -7,26 +7,50 @@ It wraps torchvision's RoIHeads with debug utilities.
 ROI Heads Architecture recap
 ─────────────────────────────
 Input:  proposals from RPN  → list of [N_i, 4] boxes per image
-        FPN feature maps    → OrderedDict of [B, 256, Hi, Wi]
+        FPN feature maps    → OrderedDict of [B, 256, Hi, Wi] #P2..P5
 
 Step 1 — ROI Align (MultiScaleRoIAlign)
   For each proposal, extract a 7×7 feature from the appropriate FPN level.
-  FPN level assignment: level = floor(4 + log2(sqrt(wh) / 224))
+  FPN level assignment: level = floor(4 + log2(sqrt(wh) / 224)) #wh = proposal box area - width × height -- [x1,y1,x2,y2] compute: w = x2-x1 , h = y2-y1
   Clamped to levels [2, 5].
   Output: [total_proposals, 256, 7, 7]
+  #rpn returns before nms proposals:
+        #   [B, 3, Hi, Wi]  — 3 anchors per location, 1 score each
+        #   [B, 12, Hi, Wi] — 3 anchors × 4 (dx,dy,dw,dh) deltas
+
+        
+####################-------- ROI Align Working ---------------###################
+Suppose proposal: [100,50,300,250] (width=200, height=200, area=40000) sqrt(40000) = 200 
+assigned to: P3
+
+ROI Align:
+
+*Step A : Maps image coordinates to feature-map coordinates. Suppose P3 stride = 8.
+Then:
+[100,50,300,250]
+↓ divide by 8
+[12.5,6.25,37.5,31.25]
+Now ROI exists on P3 feature map.
+
+*Step B : Crop that region from: [256,H,W] feature map. Maybe cropped region becomes: [256,25,25]
+
+*Step C : Resize/interpolate to: [256,7,7]
+
+Repeat for ALL proposals, If total proposals = 2000, 2000 times: crop → resize
+##################----------------------------------##################
 
 Step 2 — Box Head (TwoMLPHead)
   Flatten → FC(256×7×7 → 1024) → ReLU → FC(1024 → 1024) → ReLU
   Output: [total_proposals, 1024]
 
 Step 3 — Box Predictor (FastRCNNPredictor)
-  class scores : FC(1024 → num_classes)     → [total_proposals, num_classes]
-  box deltas   : FC(1024 → num_classes × 4) → [total_proposals, num_classes*4]
+  class scores : FC(1024 → num_classes)     → [total_proposals, num_classes] #eg,[total_proposals, 9] for Cityscapes
+  box deltas   : FC(1024 → num_classes × 4) → [total_proposals, num_classes*4] #eg,[total_proposals, 36] for Cityscapes (9 classes × 4 coords)
 
 Step 4 — Post-processing (inference only)
   box_coder.decode(deltas, proposals) → final boxes
   softmax(class_scores) → class probabilities
-  NMS per class → final detections
+  NMS per class → final detections -- boxes, labels, scores, typically top 100 per image. 
 
 Tensor flow summary
 ───────────────────
@@ -67,7 +91,7 @@ def debug_roi_heads(
     from objdet.models.detector import build_faster_rcnn
 
     print("\n" + "="*60)
-    print("DEBUG: ROI Heads tensor flow")
+    print("DEBUG: ROI Heads tensor flow, file: roi_heads.py")
     print("="*60)
 
     cfg = ModelConfig(backbone_weights="none", num_classes=9)
@@ -98,14 +122,14 @@ def debug_roi_heads(
         torch.rand(3, image_height, image_width)
         for _ in range(batch_size)
     ]
-    print(f"\nInput: {batch_size} images [3, {image_height}, {image_width}]")
+    print(f"\nInput: {batch_size} images [3, {image_height}, {image_width}], file: roi_heads.py")
 
     with torch.no_grad():
         predictions = model(dummy_images)
 
     h1.remove(); h2.remove(); h3.remove()
 
-    print("\nROI Align output (MultiScaleRoIAlign):")
+    print("\nfile: roi_heads.py, ROI Align output (MultiScaleRoIAlign):")
     roi_out = roi_hook_data.get("roi_align_output")
     if roi_out is not None:
         print(f"  Shape: {list(roi_out.shape)}")

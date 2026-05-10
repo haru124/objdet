@@ -40,7 +40,8 @@ def build_optimizer(model, training_cfg):
     AdamW: Adam + decoupled weight decay, state-of-the-art for fine-tuning
     """
     params = [p for p in model.parameters() if p.requires_grad]
-    name = training_cfg.optimizer.lower()
+    name = training_cfg.optimizer.lower() 
+    #training_cfg is TrainingConfig, which has optimizer field. training_cfg.optimizer is a string like "sgd", "adam", or "adamw"
 
     if name == "sgd":
         optimizer = SGD(
@@ -68,8 +69,8 @@ def build_optimizer(model, training_cfg):
 
     print(
         f"[Optimizer] {name.upper()} | lr={training_cfg.learning_rate} | "
-        f"wd={training_cfg.weight_decay} | "
-        f"trainable params={sum(p.numel() for p in params):,}"
+        f"weight_decay={training_cfg.weight_decay} | "
+        f"no of trainable params={sum(p.numel() for p in params):,}"
     )
     return optimizer
 
@@ -99,9 +100,13 @@ def build_scheduler(optimizer, training_cfg):
         scheduler = CosineAnnealingLR(
             optimizer,
             T_max=training_cfg.epochs,
-            eta_min=training_cfg.learning_rate * 0.01,  # min lr = 1% of initial
+            eta_min=training_cfg.learning_rate * 0.01,  # min lr = 1% of initial 
+            #stop at 1% of initial lr to avoid too small values that can cause training instability or very slow convergence in later epochs.
         )
         print(f"[Scheduler] CosineAnnealingLR | T_max={training_cfg.epochs}")
+        #CosineAnnealingLR decays the learning rate following a cosine curve, 
+        # starting from the initial learning rate and annealing down to eta_min over T_max epochs. 
+        # This often yields better performance than step decay, especially when using adaptive optimizers like AdamW.
 
     elif name == "none":
         # ConstantLR with factor=1 is effectively no scheduling
@@ -180,7 +185,7 @@ class Trainer:
 
             train_loss = self._train_one_epoch(epoch)
             val_metrics = self._validate(epoch)
-            self.scheduler.step()
+            self.scheduler.step() #means "update the learning rate according to the schedule after each epoch"
 
             lr = self.optimizer.param_groups[0]["lr"]
             print(
@@ -226,7 +231,7 @@ class Trainer:
 
     def _train_one_epoch(self, epoch: int) -> float:
         """Run one epoch; return mean total loss."""
-        self.model.train()
+        self.model.train() # set model to training mode (important for certain layers like dropout or batchnorm)
         total_loss = 0.0
         log_every = self.cfg.logging.log_every
         t0 = time.time()
@@ -255,7 +260,7 @@ class Trainer:
 
             self.optimizer.step()
 
-            loss_val = losses.item()
+            loss_val = losses.item() #losses is a tensor, .item() gets the scalar value
             total_loss += loss_val
             self.global_step += 1
 
@@ -281,4 +286,5 @@ class Trainer:
         """Run evaluation on the validation set; return metric dict."""
         evaluator = COCOEvaluator(self.device, self.cfg.eval)
         evaluator.evaluate(self.model, self.val_loader)
+        #val_loss is not computed during validation, as we are only interested in metrics like mAP.
         return evaluator.get_metrics()

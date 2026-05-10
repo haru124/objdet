@@ -37,6 +37,22 @@ class ModelConfig:
     min_size: int = 800
     max_size: int = 1333
 
+#field() gives extra control over a dataclass attribute -- to create customized field
+#field() lets you specify:
+#  default values -- dataclasses require a value for fields unless: they are initialized later or excluded from init
+#####  provides a placeholder/default object.
+#  factories - 
+####  x: list = []
+####  Problem: same list shared across all instances
+####  Correct way:
+####  x: list = field(default_factory=list)
+
+#  whether included in constructor
+#  repr behavior
+#  comparison behavior
+#  metadata
+
+
 
 # ---------------------------------------------------------------------------
 # TRAINING

@@ -13,7 +13,10 @@ and prints every intermediate tensor shape so you can verify the
 backbone output channels and spatial resolutions before plugging
 it into the full detector.
 """
+##### ------ IMPORTANT -------######## 
+#In torchvision Faster R-CNN, “backbone” means the entire feature extractor stack: ResNet body + FPN together.
 
+#################################################################################################################
 import torch
 from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 from torchvision.models import ResNet50_Weights
@@ -84,11 +87,17 @@ def build_backbone(model_cfg: ModelConfig):
         _apply_trainable_layers(backbone, model_cfg.trainable_backbone_layers)
         print("[Backbone] Extracted backbone from full COCO Faster R-CNN model.")
 
+        """
+        The second _apply_trainable_layers() exists because once you extract the backbone from the full Faster R-CNN model, 
+        you must re-apply freezing/unfreezing logic manually, since the backbone is now independent and 
+        may not fully retain the original training-layer configuration context.
+        """
+
     elif strategy == "local":
         # Start with a randomly-initialised backbone, then load weights.
         backbone = resnet_fpn_backbone(
             backbone_name="resnet50",
-            weights=None,  # no pretrained weights yet
+            weights=None,  # no pretrained weights yet or we will load from local .pth
             trainable_layers=model_cfg.trainable_backbone_layers,
         )
         _load_local_backbone_weights(backbone, model_cfg)
@@ -134,12 +143,12 @@ def _load_local_backbone_weights(backbone, model_cfg: ModelConfig):
             "[Backbone] backbone_weights='local' but local_weights_path is null in config."
         )
 
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu") #state can be either a full checkpoint dict or a backbone-only state dict
 
     if model_cfg.load_backbone_only:
-        # Case A: checkpoint saved as {"backbone_state_dict": {...}}
+        # Case A: state is a full checkpoint dict but we want only backbone. checkpoint saved as {"backbone_state_dict": {...}}
         if "backbone_state_dict" in state:
-            backbone.load_state_dict(state["backbone_state_dict"], strict=True)
+            backbone.load_state_dict(state["backbone_state_dict"], strict=True) #strict=True because we expect an exact match when loading backbone-only
             print(f"[Backbone] Loaded backbone-only weights from: {path}")
         else:
             # Fallback: assume the file IS the backbone state dict directly
@@ -155,7 +164,7 @@ def _load_local_backbone_weights(backbone, model_cfg: ModelConfig):
         #   "backbone.fpn.inner_blocks.0.weight"
         # We strip the leading "backbone." to match backbone.state_dict() keys.
         backbone_state = {
-            k.replace("backbone.", "", 1): v
+            k.replace("backbone.", "", 1): v #1 means only replace the first occurrence, which is the prefix we want to remove
             for k, v in full_state.items()
             if k.startswith("backbone.")
         }
@@ -166,7 +175,8 @@ def _load_local_backbone_weights(backbone, model_cfg: ModelConfig):
                 "If this is a backbone-only file, set load_backbone_only: true."
             )
 
-        missing, unexpected = backbone.load_state_dict(backbone_state, strict=False)
+        missing, unexpected = backbone.load_state_dict(backbone_state, strict=False) #strict=False because we allow missing keys (e.g. if the checkpoint has extra keys not used by the backbone) and unexpected keys (e.g. if the checkpoint is a full model state dict with non-backbone keys)
+        #load_state_dict returns two lists: missing keys (expected by backbone but not found in checkpoint) and unexpected keys (found in checkpoint but not expected by backbone). We print these for debugging.
         print(f"[Backbone] Loaded backbone weights from full checkpoint: {path}")
         if missing:
             print(f"  [Backbone] Missing keys  ({len(missing)}): {missing[:5]} ...")
@@ -226,7 +236,7 @@ def debug_backbone(
     All levels have out_channels=256 (FPN lateral convolutions).
     """
     print("\n" + "="*60)
-    print("DEBUG: Backbone tensor flow")
+    print("DEBUG: Backbone tensor flow, file: backbone.py")
     print("="*60)
 
     # Use "none" strategy so we don't need to download weights for debug
@@ -241,7 +251,7 @@ def debug_backbone(
         for _ in range(batch_size)
     ]
 
-    print(f"\nInput images      : {[list(img.shape) for img in dummy_images]}")
+    print(f"\nInput images      : {[list(img.shape) for img in dummy_images]}, file: backbone.py")
 
     with torch.no_grad():
         # backbone() takes a batched tensor [B, C, H, W]
@@ -251,9 +261,9 @@ def debug_backbone(
 
     print("\nFPN output feature maps:")
     for level_name, fmap in feature_maps.items():
-        print(f"  FPN level '{level_name}' : {list(fmap.shape)}")
+        print(f"  FPN level '{level_name}' : {list(fmap.shape)}, file: backbone.py")
 
-    print(f"\nBackbone out_channels : {backbone.out_channels}")
+    print(f"\nBackbone out_channels : {backbone.out_channels}, file: backbone.py")
     print("="*60 + "\n")
 
     return feature_maps

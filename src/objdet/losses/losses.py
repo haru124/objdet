@@ -45,8 +45,10 @@ from objdet.entity.config_entity import LossConfig
 class FocalLoss(nn.Module):
     """
     Focal Loss for multi-class classification.
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t) #p_t is the model's predicted probability for the true class.
+    cross_entropy(p_t) = -log(p_t)  → focal_loss = alpha * (1 - p_t)^gamma * cross_entropy(p_t)
+normally cross entropy = y_true * log(y_pred), but since y_true is 1 for the true class and 0 for others, it simplifies to -log(p_t) where p_t is the predicted probability for the true class. The focal loss then adds a modulating factor (1 - p_t)^gamma to down-weight easy examples and a weighting factor alpha to balance classes.
+    binary cross entropy: CE(p_t) = -[y*log(p_t) + (1-y)*log(1-p_t)]
     Motivation: down-weights easy examples (high p_t) so training focuses
     on hard/misclassified samples. Originally from RetinaNet but applicable
     to ROI head classification in Faster R-CNN.

@@ -63,7 +63,7 @@ class ConfigurationManager:
     def _data_config(d: dict) -> DataConfig:
         return DataConfig(
             root=d.get("root", "data/"),
-            images_dir=d.get("images_dir", "data/Images"),
+            images_dir=d.get("images_dir", "data/images"),
             annotations_dir=d.get("annotations_dir", "data/gtFine"),
             num_workers=d.get("num_workers", 4),
             pin_memory=d.get("pin_memory", True),

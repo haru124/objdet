@@ -32,11 +32,18 @@ C5: 2048 ch → FPN lateral conv (1×1) → 256 ch → P5
 P5 max-pool → P6  (used for large-object RPN anchors)
 """
 
+##### ------ IMPORTANT -------######## 
+#In torchvision Faster R-CNN, “backbone” means the entire feature extractor stack: ResNet body + FPN together.
+
+#################################################################################################################
+
 import torch
 from objdet.entity.config_entity import ModelConfig
 
 
-def get_fpn_from_backbone(backbone):
+def get_fpn_from_backbone(backbone):    #only extracts the already created fpn from backbone. 
+    #in case of imagenet weights with backbone only, fpn is randomly initialized and not pretrained, but we can still inspect its tensor flow and output shapes. 
+    # In case of loading a full model checkpoint, the fpn weights will be loaded into backbone.fpn, so we can inspect the pretrained fpn tensor flow and output shapes as well.
     """
     Extract the FeaturePyramidNetwork sub-module from a BackboneWithFPN.
 
@@ -68,7 +75,7 @@ def debug_fpn(
     from objdet.models.backbone import build_backbone
 
     print("\n" + "="*60)
-    print("DEBUG: FPN tensor flow (body → FPN separately)")
+    print("DEBUG: FPN tensor flow (body → FPN separately), file: fpn.py")
     print("="*60)
 
     cfg = ModelConfig(backbone_weights="none")
@@ -76,7 +83,7 @@ def debug_fpn(
     backbone.eval()
 
     dummy_batch = torch.rand(batch_size, 3, image_height, image_width)
-    print(f"\nInput batch shape   : {list(dummy_batch.shape)}")
+    print(f"\nInput batch shape   : {list(dummy_batch.shape)}, file: fpn.py")
 
     with torch.no_grad():
         # --- Step 1: ResNet body (bottom-up) ---
@@ -86,14 +93,14 @@ def debug_fpn(
 
         print("\nResNet-50 body outputs (C2–C5):")
         for name, fmap in body_outputs.items():
-            print(f"  Layer '{name}' : {list(fmap.shape)}")
+            print(f"  Layer '{name}' : {list(fmap.shape)}, file: fpn.py")
 
         # --- Step 2: FPN (top-down + lateral) ---
         fpn_outputs = backbone.fpn(body_outputs)   # OrderedDict
 
         print("\nFPN outputs (P2–P6):")
         for name, fmap in fpn_outputs.items():
-            print(f"  FPN level '{name}' : {list(fmap.shape)}")
+            print(f"  FPN level '{name}' : {list(fmap.shape)}, file: fpn.py")
 
         # Sanity check: all FPN levels should have 256 channels
         for name, fmap in fpn_outputs.items():

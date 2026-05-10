@@ -61,12 +61,13 @@ def build_faster_rcnn(model_cfg: ModelConfig) -> FasterRCNN:
             trainable_backbone_layers=model_cfg.trainable_backbone_layers,
         )
         model.backbone = backbone
-        print("[Detector] Replaced model.backbone with custom-loaded backbone.")
+        print("[Detector] Replaced model.backbone with custom-loaded backbone., file: detector.py")
 
     # Step 3 — Replace box predictor head
     # roi_heads.box_predictor is FastRCNNPredictor(in_features=1024, num_classes=91)
     # We replace it with one sized for our dataset (e.g. 9 for Cityscapes).
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    in_features = model.roi_heads.box_predictor.cls_score.in_features 
+    # in_features is 1024 for ResNet-50 backbone with FPN, as the box_head outputs 1024-dim features. 
     model.roi_heads.box_predictor = FastRCNNPredictor(
         in_features, model_cfg.num_classes
     )
@@ -104,7 +105,7 @@ def debug_detector(
     h, w, b = image_height, image_width, batch_size
 
     print("\n" + "#"*60)
-    print("# FULL DETECTOR DEBUG — tensor flow at each stage")
+    print("# FULL DETECTOR DEBUG — tensor flow at each stage, file: detector.py")
     print("#"*60)
 
     debug_backbone(h, w, b)
@@ -113,5 +114,5 @@ def debug_detector(
     debug_roi_heads(h, w, b)
 
     print("#"*60)
-    print("# FULL DETECTOR DEBUG COMPLETE")
+    print("# FULL DETECTOR DEBUG COMPLETE, file: detector.py")
     print("#"*60 + "\n")
