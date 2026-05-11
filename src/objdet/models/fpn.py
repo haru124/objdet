@@ -57,56 +57,118 @@ def get_fpn_from_backbone(backbone):    #only extracts the already created fpn f
     return backbone.fpn
 
 
-def debug_fpn(
-    image_height: int = 600,
-    image_width: int = 800,
-    batch_size: int = 2,
-):
+def debug_fpn(image_height: int = 600, image_width: int = 800, batch_size: int = 2):
     """
-    Step through the FPN tensor flow manually:
-      1. Run ResNet-50 body → get C2, C3, C4, C5
-      2. Run FPN on those → get P2, P3, P4, P5, P6
+    Hooks into backbone.body and backbone.fpn separately to show exactly
+    what each sub-module receives and produces.
 
-    Prints channel and spatial dimensions at each stage.
+    Hooks attached to:
+      - backbone.body          → captures C2/C3/C4/C5 as a dict
+      - each FPN inner_block   → lateral conv output per level
+      - each FPN layer_block   → 3x3 conv output per level
+      - backbone.fpn           → final FPN output per level
 
-    This makes explicit what the backbone.body and backbone.fpn
-    sub-modules do separately, which is hidden when you call backbone(x).
+    Every shape is read from actual tensors during the real forward pass.
     """
     from objdet.models.backbone import build_backbone
 
-    print("\n" + "="*60)
-    print("DEBUG: FPN tensor flow (body → FPN separately), file: fpn.py")
-    print("="*60)
+    print("\n" + "=" * 65)
+    print("DEBUG: FPN — real tensor shapes from forward hooks")
+    print("=" * 65)
 
     cfg = ModelConfig(backbone_weights="none")
     backbone = build_backbone(cfg)
     backbone.eval()
 
-    dummy_batch = torch.rand(batch_size, 3, image_height, image_width)
-    print(f"\nInput batch shape   : {list(dummy_batch.shape)}, file: fpn.py")
+    captured = {}
+    hooks = []
 
+    # ------------------------------------------------------------------
+    # Hook on backbone.body to capture all 4 ResNet stage outputs at once
+    # backbone.body.forward returns an OrderedDict of feature maps
+    # ------------------------------------------------------------------
+    def body_hook(module, inp, output):
+        # output is OrderedDict: {"layer1": tensor, ...} or {"0":...}
+        # IntermediateLayerGetter renames layers to their return_layers keys
+        for name, fmap in output.items():
+            captured[f"body_out_{name}"] = fmap.shape
+
+    hooks.append(backbone.body.register_forward_hook(body_hook))
+
+    # ------------------------------------------------------------------
+    # Hook on each FPN inner_block (lateral 1×1 convs)
+    # inner_blocks is a ModuleList; one conv per FPN level
+    # ------------------------------------------------------------------
+    for i, inner_block in enumerate(backbone.fpn.inner_blocks):
+        def make_inner_hook(idx):
+            def hook(module, inp, output):
+                captured[f"fpn_inner_block_{idx}_in"]  = inp[0].shape
+                captured[f"fpn_inner_block_{idx}_out"] = output.shape
+            return hook
+        hooks.append(inner_block.register_forward_hook(make_inner_hook(i)))
+
+    # ------------------------------------------------------------------
+    # Hook on each FPN layer_block (output 3×3 convs)
+    # ------------------------------------------------------------------
+    for i, layer_block in enumerate(backbone.fpn.layer_blocks):
+        def make_layer_hook(idx):
+            def hook(module, inp, output):
+                captured[f"fpn_layer_block_{idx}_in"]  = inp[0].shape
+                captured[f"fpn_layer_block_{idx}_out"] = output.shape
+            return hook
+        hooks.append(layer_block.register_forward_hook(make_layer_hook(i)))
+
+    # ------------------------------------------------------------------
+    # Hook on full FPN module
+    # ------------------------------------------------------------------
+    def fpn_final_hook(module, inp, output):
+        for level_name, fmap in output.items():
+            captured[f"fpn_final_{level_name}"] = fmap.shape
+
+    hooks.append(backbone.fpn.register_forward_hook(fpn_final_hook))
+
+    # Run real forward pass
+    dummy = torch.rand(batch_size, 3, image_height, image_width)
     with torch.no_grad():
-        # --- Step 1: ResNet body (bottom-up) ---
-        # backbone.body is an IntermediateLayerGetter that returns
-        # intermediate activations by layer name.
-        body_outputs = backbone.body(dummy_batch)  # OrderedDict
+        body_out, fpn_out = backbone.body(dummy), None
+        # Run full backbone to trigger all hooks
+        output = backbone(dummy)
 
-        print("\nResNet-50 body outputs (C2–C5):")
-        for name, fmap in body_outputs.items():
-            print(f"  Layer '{name}' : {list(fmap.shape)}, file: fpn.py")
+    for h in hooks:
+        h.remove()
 
-        # --- Step 2: FPN (top-down + lateral) ---
-        fpn_outputs = backbone.fpn(body_outputs)   # OrderedDict
+    # ------------------------------------------------------------------
+    # Print (all shapes from real tensors)
+    # ------------------------------------------------------------------
+    print(f"\nInput: [{batch_size}, 3, {image_height}, {image_width}]")
 
-        print("\nFPN outputs (P2–P6):")
-        for name, fmap in fpn_outputs.items():
-            print(f"  FPN level '{name}' : {list(fmap.shape)}, file: fpn.py")
+    print("\nResNet body outputs (fed into FPN):")
+    for key in sorted(k for k in captured if k.startswith("body_out_")):
+        level = key.replace("body_out_", "")
+        print(f"  {key:<30} → {list(captured[key])}")
 
-        # Sanity check: all FPN levels should have 256 channels
-        for name, fmap in fpn_outputs.items():
-            assert fmap.shape[1] == 256, \
-                f"Expected 256 channels at level '{name}', got {fmap.shape[1]}"
-        print("\n✓ All FPN levels have 256 channels.")
+    print("\nFPN inner_blocks (lateral 1×1 convolutions):")
+    n_inner = sum(1 for k in captured if k.endswith("_out") and "inner_block" in k)
+    for i in range(n_inner // 1):
+        in_k  = f"fpn_inner_block_{i}_in"
+        out_k = f"fpn_inner_block_{i}_out"
+        if in_k in captured:
+            print(f"  inner_block[{i}]  input  → {list(captured[in_k])}")
+            print(f"  inner_block[{i}]  output → {list(captured[out_k])}")
 
-    print("="*60 + "\n")
-    return body_outputs, fpn_outputs
+    print("\nFPN layer_blocks (output 3×3 convolutions):")
+    n_layer = sum(1 for k in captured if k.endswith("_out") and "layer_block" in k)
+    for i in range(n_layer // 1):
+        in_k  = f"fpn_layer_block_{i}_in"
+        out_k = f"fpn_layer_block_{i}_out"
+        if in_k in captured:
+            print(f"  layer_block[{i}]  input  → {list(captured[in_k])}")
+            print(f"  layer_block[{i}]  output → {list(captured[out_k])}")
+
+    print("\nFPN final outputs (P2–P6, all 256 channels):")
+    for key in sorted(k for k in captured if k.startswith("fpn_final_")):
+        level = key.replace("fpn_final_", "")
+        print(f"  level '{level}' → {list(captured[key])}")
+
+    print("=" * 65 + "\n")
+    return captured

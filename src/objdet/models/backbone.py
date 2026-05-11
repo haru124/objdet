@@ -1,22 +1,17 @@
 """
 models/backbone.py
 
-Builds a ResNet-50 + FPN backbone.
-Supports three weight loading strategies controlled by ModelConfig:
-  "imagenet" → ResNet-50 ImageNet weights (backbone only)
-  "coco"     → full Faster R-CNN COCO weights applied to backbone
-  "local"    → weights from a local .pth file
-  "none"     → random initialisation
+Builds a ResNet-50 + FPN backbone (BackboneWithFPN).
+Supports four weight-loading strategies via ModelConfig.backbone_weights:
+  "imagenet" → ResNet-50 ImageNet weights; FPN randomly initialised
+  "coco"     → backbone extracted from full COCO Faster R-CNN (FPN weights included)
+  "local"    → weights from a local .pth file (full model or backbone-only)
+  "none"     → random initialisation (ablation / debug)
 
-The debug_backbone() function runs a forward pass with dummy data
-and prints every intermediate tensor shape so you can verify the
-backbone output channels and spatial resolutions before plugging
-it into the full detector.
+debug_backbone() attaches real PyTorch forward hooks to capture and print
+the actual tensor shape at every internal stage. No hardcoded values.
 """
-##### ------ IMPORTANT -------######## 
-#In torchvision Faster R-CNN, “backbone” means the entire feature extractor stack: ResNet body + FPN together.
 
-#################################################################################################################
 import torch
 from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 from torchvision.models import ResNet50_Weights
@@ -36,37 +31,38 @@ def build_backbone(model_cfg: ModelConfig):
     """
     Return a BackboneWithFPN (ResNet-50 + FPN) configured per model_cfg.
 
-    BackboneWithFPN.out_channels == 256 always (FPN output).
-    It exposes 4 feature-map levels: '0', '1', '2', '3'
-    (plus a 5th 'pool' level for ROI pooling, added by torchvision).
+    BackboneWithFPN.out_channels == 256 always (FPN lateral conv output).
+    Exposes OrderedDict with keys '0', '1', '2', '3' (+ 'pool' for ROI Align).
 
-    Weight strategy
-    ---------------
+    Weight strategies
+    -----------------
     "imagenet"
-        resnet_fpn_backbone loads ResNet-50 with ImageNet weights.
-        FPN weights are randomly initialised (standard fine-tune setup).
+        resnet_fpn_backbone with ResNet50_Weights.IMAGENET1K_V1.
+        FPN weights are randomly initialised — the standard fine-tune setup.
 
     "coco"
-        Build the full Faster R-CNN COCO model, then extract its backbone.
-        This gives FPN weights trained end-to-end on COCO, not just ImageNet.
+        Build the full COCO Faster R-CNN, extract its backbone sub-module.
+        Gives FPN weights trained end-to-end on COCO (not just ImageNet body).
+        _apply_trainable_layers() is called again after extraction because
+        trainable-layer state is tied to the full model context in the factory.
 
     "local" + load_backbone_only=True
-        Load a .pth produced by save_checkpoint() that contains backbone
-        state under the key "backbone_state_dict" (our custom key).
+        .pth was saved by save_backbone_only_checkpoint(); contains key
+        "backbone_state_dict". Loaded directly into the backbone sub-module.
 
     "local" + load_backbone_only=False
-        Load a full Faster R-CNN state dict from disk, strip the "backbone."
-        prefix, and load only the backbone sub-module weights.
+        .pth is a full Faster R-CNN checkpoint. Keys like
+        "backbone.body.layer1.0.conv1.weight" are stripped of the "backbone."
+        prefix and loaded into the backbone sub-module (strict=False to
+        tolerate any minor key mismatches).
 
     "none"
-        Fully random weights. Useful for ablation studies.
+        Fully random. Used for ablation studies and debug mode.
     """
-
     strategy = model_cfg.backbone_weights.lower()
-    print(f"[DEBUG] Backbone strategy: '{strategy}'")  # DEBUG: print the strategy
+    print(f"[Backbone] Strategy: '{strategy}'")
 
     if strategy == "imagenet":
-        # Standard approach: ResNet-50 pretrained on ImageNet, FPN random init
         backbone = resnet_fpn_backbone(
             backbone_name="resnet50",
             weights=ResNet50_Weights.IMAGENET1K_V1,
@@ -75,29 +71,23 @@ def build_backbone(model_cfg: ModelConfig):
         print("[Backbone] Loaded ResNet-50 ImageNet weights (FPN randomly initialised).")
 
     elif strategy == "coco":
-        # Load the full COCO Faster R-CNN, then detach its backbone submodule.
+        # Load full COCO model then detach its backbone.
         # This is the cleanest way to get FPN weights trained on COCO.
         full_model = fasterrcnn_resnet50_fpn(
             weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT,
             trainable_backbone_layers=model_cfg.trainable_backbone_layers,
         )
         backbone = full_model.backbone
-        # Apply trainable-layer freeze manually because we pulled backbone
-        # out of the full model after the factory already set it.
+        # Re-apply freeze/unfreeze because the backbone is now a standalone
+        # module and may not fully retain the factory's layer-freeze state.
         _apply_trainable_layers(backbone, model_cfg.trainable_backbone_layers)
         print("[Backbone] Extracted backbone from full COCO Faster R-CNN model.")
 
-        """
-        The second _apply_trainable_layers() exists because once you extract the backbone from the full Faster R-CNN model, 
-        you must re-apply freezing/unfreezing logic manually, since the backbone is now independent and 
-        may not fully retain the original training-layer configuration context.
-        """
-
     elif strategy == "local":
-        # Start with a randomly-initialised backbone, then load weights.
+        # Start with random weights, then overwrite from the local file.
         backbone = resnet_fpn_backbone(
             backbone_name="resnet50",
-            weights=None,  # no pretrained weights yet or we will load from local .pth
+            weights=None,
             trainable_layers=model_cfg.trainable_backbone_layers,
         )
         _load_local_backbone_weights(backbone, model_cfg)
@@ -108,7 +98,7 @@ def build_backbone(model_cfg: ModelConfig):
             weights=None,
             trainable_layers=model_cfg.trainable_backbone_layers,
         )
-        print("[Backbone] Using randomly initialised backbone (no pretrained weights).")
+        print("[Backbone] Random initialisation (no pretrained weights).")
 
     else:
         raise ValueError(
@@ -120,22 +110,22 @@ def build_backbone(model_cfg: ModelConfig):
 
 
 # ---------------------------------------------------------------------------
-# Local weight loading helper
+# Local weight loading
 # ---------------------------------------------------------------------------
 
 def _load_local_backbone_weights(backbone, model_cfg: ModelConfig):
     """
     Load backbone weights from a local .pth file.
 
-    Two sub-cases:
-    A) load_backbone_only=True
-       The .pth was saved with our custom key "backbone_state_dict".
-       Directly load into the backbone module.
+    Case A — load_backbone_only=True:
+        File contains key "backbone_state_dict" (written by
+        save_backbone_only_checkpoint). Loaded with strict=True.
 
-    B) load_backbone_only=False
-       The .pth is a full model checkpoint (e.g. saved by save_checkpoint).
-       The full state dict has keys like "model_state_dict.backbone.body.layer1..."
-       We strip the "backbone." prefix and load into the backbone.
+    Case B — load_backbone_only=False:
+        File is a full model checkpoint (written by save_checkpoint).
+        Keys beginning with "backbone." are stripped and loaded with
+        strict=False to tolerate minor key mismatches between COCO
+        and Cityscapes model variants.
     """
     path = model_cfg.local_weights_path
     if path is None:
@@ -143,73 +133,74 @@ def _load_local_backbone_weights(backbone, model_cfg: ModelConfig):
             "[Backbone] backbone_weights='local' but local_weights_path is null in config."
         )
 
-    state = torch.load(path, map_location="cpu") #state can be either a full checkpoint dict or a backbone-only state dict
+    state = torch.load(path, map_location="cpu")
 
     if model_cfg.load_backbone_only:
-        # Case A: state is a full checkpoint dict but we want only backbone. checkpoint saved as {"backbone_state_dict": {...}}
+        # Case A: file is a backbone-only checkpoint
         if "backbone_state_dict" in state:
-            backbone.load_state_dict(state["backbone_state_dict"], strict=True) #strict=True because we expect an exact match when loading backbone-only
-            print(f"[Backbone] Loaded backbone-only weights from: {path}")
+            backbone.load_state_dict(state["backbone_state_dict"], strict=True)
         else:
-            # Fallback: assume the file IS the backbone state dict directly
+            # Fallback: assume the file IS the state dict directly
             backbone.load_state_dict(state, strict=True)
-            print(f"[Backbone] Loaded backbone state dict directly from: {path}")
+        print(f"[Backbone] Loaded backbone-only weights from: {path}")
 
     else:
-        # Case B: full model checkpoint → extract "backbone.*" keys
+        # Case B: full model checkpoint — extract "backbone.*" keys
         full_state = state.get("model_state_dict", state)
 
-        # Keys in a full Faster R-CNN model look like:
+        # Full Faster R-CNN keys look like:
         #   "backbone.body.layer1.0.conv1.weight"
         #   "backbone.fpn.inner_blocks.0.weight"
-        # We strip the leading "backbone." to match backbone.state_dict() keys.
+        # Strip the leading "backbone." (first occurrence only) to match
+        # backbone.state_dict() keys.
         backbone_state = {
-            k.replace("backbone.", "", 1): v #1 means only replace the first occurrence, which is the prefix we want to remove
+            k.replace("backbone.", "", 1): v
             for k, v in full_state.items()
             if k.startswith("backbone.")
         }
 
         if not backbone_state:
             raise RuntimeError(
-                f"[Backbone] No 'backbone.*' keys found in checkpoint: {path}. "
+                f"[Backbone] No 'backbone.*' keys found in: {path}. "
                 "If this is a backbone-only file, set load_backbone_only: true."
             )
 
-        missing, unexpected = backbone.load_state_dict(backbone_state, strict=False) #strict=False because we allow missing keys (e.g. if the checkpoint has extra keys not used by the backbone) and unexpected keys (e.g. if the checkpoint is a full model state dict with non-backbone keys)
-        #load_state_dict returns two lists: missing keys (expected by backbone but not found in checkpoint) and unexpected keys (found in checkpoint but not expected by backbone). We print these for debugging.
+        missing, unexpected = backbone.load_state_dict(backbone_state, strict=False)
         print(f"[Backbone] Loaded backbone weights from full checkpoint: {path}")
         if missing:
-            print(f"  [Backbone] Missing keys  ({len(missing)}): {missing[:5]} ...")
+            print(f"  [Backbone] Missing keys   ({len(missing)}): {missing[:5]} ...")
         if unexpected:
-            print(f"  [Backbone] Unexpected keys ({len(unexpected)}): {unexpected[:5]} ...")
+            print(f"  [Backbone] Unexpected keys({len(unexpected)}): {unexpected[:5]} ...")
 
 
 # ---------------------------------------------------------------------------
-# Trainable-layer control helper (used after pulling backbone from full model)
+# Trainable-layer control
 # ---------------------------------------------------------------------------
 
 def _apply_trainable_layers(backbone, trainable_layers: int):
     """
-    Freeze ResNet stages so that only the last *trainable_layers* stages
-    have requires_grad=True.
+    Freeze ResNet stages so only the last *trainable_layers* stages train.
 
-    ResNet-50 stages:  stem(0), layer1(1), layer2(2), layer3(3), layer4(4)
-    trainable_layers=3 → freeze stem+layer1+layer2, train layer3+layer4+FPN
-    This mirrors what resnet_fpn_backbone() does internally.
+    ResNet-50 stages: stem(0), layer1(1), layer2(2), layer3(3), layer4(4)
+
+    trainable_layers=3 → freeze stem + layer1 + layer2
+                         train  layer3 + layer4 + FPN
+
+    This mirrors what resnet_fpn_backbone() does internally so behaviour
+    is consistent whether we build the backbone directly or extract it
+    from a full COCO model.
     """
-    # Layers from stem to end — matches torchvision ordering
-    layers_to_train = ["layer4", "layer3", "layer2", "layer1", "layer0"]
-    layers_to_train = layers_to_train[:trainable_layers]
+    # Ordered from outermost (layer4) to innermost (stem/layer0)
+    all_layers = ["layer4", "layer3", "layer2", "layer1", "layer0"]
+    layers_to_train = set(all_layers[:trainable_layers])
 
     for name, param in backbone.named_parameters():
-        # If the parameter belongs to a layer we want to train, leave it.
-        # Otherwise freeze it.
         should_train = any(name.startswith(layer) for layer in layers_to_train)
         param.requires_grad_(should_train)
 
 
 # ---------------------------------------------------------------------------
-# DEBUG HOOK — run this standalone to inspect backbone tensor flow
+# DEBUG — real forward hooks, no hardcoded shapes
 # ---------------------------------------------------------------------------
 
 def debug_backbone(
@@ -218,52 +209,115 @@ def debug_backbone(
     batch_size: int = 2,
 ):
     """
-    Run a forward pass through the backbone with dummy input.
-    Prints tensor shapes at each FPN output level.
+    Attach PyTorch forward hooks to every ResNet stage and to the FPN,
+    run one forward pass with dummy input, and print the real tensor
+    shape captured at each hook.
 
-    No training, no dataset, no GPU required.
+    Hook attachment points:
+      backbone.body.layer1  (ResNet C2 — stride 4)
+      backbone.body.layer2  (ResNet C3 — stride 8)
+      backbone.body.layer3  (ResNet C4 — stride 16)
+      backbone.body.layer4  (ResNet C5 — stride 32)
+      backbone.fpn          (FPN top-down output — all levels 256ch)
+      backbone              (full module — captures batched input shape)
 
-    Expected output (ResNet-50 + FPN, input 600×800):
-    ──────────────────────────────────────────────────
-    Input images      : [2, 3, 600, 800]
-    FPN level '0'     : [2, 256, 150, 200]   ← stride 4  (layer1 output)
-    FPN level '1'     : [2, 256,  75, 100]   ← stride 8  (layer2 output)
-    FPN level '2'     : [2, 256,  38,  50]   ← stride 16 (layer3 output)
-    FPN level '3'     : [2, 256,  19,  25]   ← stride 32 (layer4 output)
-    FPN level 'pool'  : [2, 256,  10,  13]   ← stride 64 (max-pool of level 3)
-    ──────────────────────────────────────────────────
-    The 'pool' level is used by ROI Align for large objects.
-    All levels have out_channels=256 (FPN lateral convolutions).
+    Every printed value is read from a real tensor during the forward pass.
+    Nothing is hardcoded.
+
+    No GPU, no dataset, no checkpoint required.
     """
-    print("\n" + "="*60)
-    print("DEBUG: Backbone tensor flow, file: backbone.py")
-    print("="*60)
+    print("\n" + "=" * 65)
+    print("DEBUG: Backbone — real tensor shapes via forward hooks")
+    print("  file: models/backbone.py :: debug_backbone()")
+    print("=" * 65)
 
-    # Use "none" strategy so we don't need to download weights for debug
-    from objdet.entity.config_entity import ModelConfig
+    # Use "none" so debug works without downloading weights
     cfg = ModelConfig(backbone_weights="none", trainable_backbone_layers=3)
     backbone = build_backbone(cfg)
     backbone.eval()
 
-    # Faster R-CNN's GeneralizedTransform expects values in [0,1]
-    dummy_images = [
-        torch.rand(3, image_height, image_width)
-        for _ in range(batch_size)
-    ]
+    # ── Storage for hook captures ──────────────────────────────────────
+    captured: dict = {}
+    hooks: list = []
 
-    print(f"\nInput images      : {[list(img.shape) for img in dummy_images]}, file: backbone.py")
+    # ── Hook: each ResNet stage ────────────────────────────────────────
+    # backbone.body is IntermediateLayerGetter wrapping the ResNet.
+    # Direct children named layer1..layer4 are the four residual stages.
+    resnet_stages = ["layer1", "layer2", "layer3", "layer4"]
+    stage_labels  = {"layer1": "C2", "layer2": "C3",
+                     "layer3": "C4", "layer4": "C5"}
 
+    for stage_name in resnet_stages:
+        layer = getattr(backbone.body, stage_name, None)
+        if layer is None:
+            continue
+
+        def _make_stage_hook(name):
+            # Closure captures name correctly per iteration
+            def hook(module, inp, output):
+                # inp[0]: input tensor to this stage [B, C_in, H, W]
+                # output: output tensor               [B, C_out, H/2, W/2]
+                captured[f"body_{name}_in"]  = tuple(inp[0].shape)
+                captured[f"body_{name}_out"] = tuple(output.shape)
+            return hook
+
+        hooks.append(layer.register_forward_hook(_make_stage_hook(stage_name)))
+
+    # ── Hook: FPN module ───────────────────────────────────────────────
+    # FPN.forward returns an OrderedDict: {"0": P2, "1": P3, "2": P4, "3": P5}
+    def _fpn_hook(module, inp, output):
+        for level_name, fmap in output.items():
+            captured[f"fpn_{level_name}"] = tuple(fmap.shape)
+
+    hooks.append(backbone.fpn.register_forward_hook(_fpn_hook))
+
+    # ── Hook: full backbone (to capture batched input shape) ───────────
+    def _backbone_in_hook(module, inp, output):
+        # inp[0] is the batched image tensor [B, 3, H, W]
+        captured["backbone_input"] = tuple(inp[0].shape)
+
+    hooks.append(backbone.register_forward_hook(_backbone_in_hook))
+
+    # ── Forward pass ──────────────────────────────────────────────────
+    dummy_batch = torch.rand(batch_size, 3, image_height, image_width)
     with torch.no_grad():
-        # backbone() takes a batched tensor [B, C, H, W]
-        # (the full model handles image list → tensor internally via Transform)
-        dummy_batch = torch.stack(dummy_images)  # [B, 3, H, W]
-        feature_maps = backbone(dummy_batch)     # OrderedDict
+        feature_maps = backbone(dummy_batch)
 
-    print("\nFPN output feature maps:")
-    for level_name, fmap in feature_maps.items():
-        print(f"  FPN level '{level_name}' : {list(fmap.shape)}, file: backbone.py")
+    # Remove all hooks immediately after use
+    for h in hooks:
+        h.remove()
 
-    print(f"\nBackbone out_channels : {backbone.out_channels}, file: backbone.py")
-    print("="*60 + "\n")
+    # ── Print results ──────────────────────────────────────────────────
+    print(f"\n  Input to backbone        : {list(captured.get('backbone_input', []))}")
 
-    return feature_maps
+    print(f"\n  ResNet body — bottom-up pathway (feature extraction):")
+    for stage in resnet_stages:
+        in_s  = list(captured.get(f"body_{stage}_in",  []))
+        out_s = list(captured.get(f"body_{stage}_out", []))
+        label = stage_labels[stage]
+        print(f"    {stage} ({label})")
+        print(f"      input  → {in_s}")
+        print(f"      output → {out_s}")
+
+    print(f"\n  FPN — top-down pathway (all levels: {backbone.out_channels} channels):")
+    for level_key in sorted(k for k in captured if k.startswith("fpn_")):
+        level = level_key.replace("fpn_", "")
+        shape = list(captured[level_key])
+        print(f"    P{level} (FPN level '{level}') → {shape}")
+
+    # Verify channel dimension matches backbone.out_channels
+    channel_errors = []
+    for level_key in (k for k in captured if k.startswith("fpn_")):
+        ch = captured[level_key][1]
+        if ch != backbone.out_channels:
+            channel_errors.append(f"{level_key}: expected {backbone.out_channels}, got {ch}")
+
+    if channel_errors:
+        print(f"\n  [ERROR] Channel mismatches: {channel_errors}")
+    else:
+        print(f"\n  ✓ All FPN levels verified: {backbone.out_channels} channels each.")
+
+    print(f"  backbone.out_channels    : {backbone.out_channels}")
+    print("=" * 65 + "\n")
+
+    return feature_maps, captured

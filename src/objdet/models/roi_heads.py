@@ -74,88 +74,160 @@ def get_roi_heads_from_model(model):
     return model.roi_heads
 
 
-def debug_roi_heads(
-    image_height: int = 600,
-    image_width: int = 800,
-    batch_size: int = 2,
-):
+def debug_roi_heads(image_height: int = 600, image_width: int = 800, batch_size: int = 2):
     """
-    Run a forward pass and intercept the ROI heads intermediate tensors
-    via forward hooks to print shapes at every stage.
+    Hooks into every sub-module of RoIHeads:
+      - roi_heads.box_roi_pool   → MultiScaleRoIAlign output
+      - roi_heads.box_head       → TwoMLPHead output
+      - roi_heads.box_predictor  → FastRCNNPredictor output
+      - roi_heads                → full RoIHeads output (final detections)
 
-    Hooks are registered on:
-      model.roi_heads.box_roi_pool   → ROI Align output
-      model.roi_heads.box_head       → TwoMLPHead output
-      model.roi_heads.box_predictor  → final logits + deltas
+    Also captures the proposal boxes fed INTO roi_heads from RPN via
+    a hook on the RPN output, so we can show the full data flow.
+
+    Every shape comes from real tensors during the actual forward pass.
     """
     from objdet.models.detector import build_faster_rcnn
 
-    print("\n" + "="*60)
-    print("DEBUG: ROI Heads tensor flow, file: roi_heads.py")
-    print("="*60)
+    print("\n" + "=" * 65)
+    print("DEBUG: ROI Heads — real tensor shapes from forward hooks")
+    print("=" * 65)
 
     cfg = ModelConfig(backbone_weights="none", num_classes=9)
     model = build_faster_rcnn(cfg)
     model.eval()
 
-    roi_hook_data = {}
+    captured = {}
+    hooks = []
 
-    # Hook 1: ROI Align output → [total_proposals, 256, 7, 7]
-    def _roi_pool_hook(module, inputs, output):
-        roi_hook_data["roi_align_output"] = output
+    # ------------------------------------------------------------------
+    # Capture RPN output proposals before they enter ROI heads
+    # RPN hook → proposals = list of [N_i, 4] per image
+    # ------------------------------------------------------------------
+    def rpn_out_hook(module, inp, output):
+        boxes, _ = output   # output = (proposals, losses)
+        captured["rpn_proposals"] = [list(b.shape) for b in boxes]
+        captured["rpn_proposal_total"] = sum(b.shape[0] for b in boxes)
 
-    # Hook 2: TwoMLPHead output → [total_proposals, 1024]
-    def _box_head_hook(module, inputs, output):
-        roi_hook_data["box_head_output"] = output
+    hooks.append(model.rpn.register_forward_hook(rpn_out_hook))
 
-    # Hook 3: FastRCNNPredictor output → (class_logits, box_deltas)
-    def _box_predictor_hook(module, inputs, outputs):
-        class_logits, box_deltas = outputs
-        roi_hook_data["class_logits"] = class_logits
-        roi_hook_data["box_deltas"] = box_deltas
+    # ------------------------------------------------------------------
+    # Hook on MultiScaleRoIAlign (box_roi_pool)
+    # Input:  feature_maps (dict) + proposals (list of boxes) + image_sizes
+    # Output: [total_proposals_in_batch, C, pool_h, pool_w]
+    #         where pool_h = pool_w = 7 (default for Faster R-CNN)
+    # ------------------------------------------------------------------
+    def roi_pool_hook(module, inp, output):
+        # inp[0] = feature_maps dict, inp[1] = proposal boxes, inp[2] = image_sizes
+        # We capture the input proposal boxes to show what goes IN
+        proposals_in = inp[1]   # list of [N_i, 4] per image
+        captured["roi_pool_proposals_in"] = [list(p.shape) for p in proposals_in]
+        captured["roi_pool_total_proposals"] = sum(p.shape[0] for p in proposals_in)
+        captured["roi_pool_output"] = list(output.shape)
+        # output: [total_proposals, 256, 7, 7]
 
-    h1 = model.roi_heads.box_roi_pool.register_forward_hook(_roi_pool_hook)
-    h2 = model.roi_heads.box_head.register_forward_hook(_box_head_hook)
-    h3 = model.roi_heads.box_predictor.register_forward_hook(_box_predictor_hook)
+    hooks.append(model.roi_heads.box_roi_pool.register_forward_hook(roi_pool_hook))
 
+    # ------------------------------------------------------------------
+    # Hook on TwoMLPHead (box_head)
+    # Input:  [total_proposals, 256, 7, 7]  (flattened internally to 256*7*7=12544)
+    # Output: [total_proposals, 1024]
+    # ------------------------------------------------------------------
+    def box_head_hook(module, inp, output):
+        captured["box_head_input"]  = list(inp[0].shape)
+        captured["box_head_output"] = list(output.shape)
+
+    hooks.append(model.roi_heads.box_head.register_forward_hook(box_head_hook))
+
+    # ------------------------------------------------------------------
+    # Hook on FastRCNNPredictor (box_predictor)
+    # Input:  [total_proposals, 1024]
+    # Output: (class_logits [total, num_classes],
+    #          box_deltas   [total, num_classes*4])
+    # ------------------------------------------------------------------
+    def box_predictor_hook(module, inp, output):
+        class_logits, box_deltas = output
+        captured["predictor_input"]        = list(inp[0].shape)
+        captured["predictor_class_logits"] = list(class_logits.shape)
+        captured["predictor_box_deltas"]   = list(box_deltas.shape)
+        captured["num_classes"]            = class_logits.shape[1]
+        captured["num_classes_x4"]         = box_deltas.shape[1]
+
+    hooks.append(model.roi_heads.box_predictor.register_forward_hook(box_predictor_hook))
+
+    # ------------------------------------------------------------------
+    # Hook on full RoIHeads module
+    # Output in eval mode: list of dicts per image
+    # Each dict: {"boxes": [K,4], "labels": [K], "scores": [K]}
+    # ------------------------------------------------------------------
+    def roi_heads_out_hook(module, inp, output):
+        detections, _ = output   # (detections_list, losses_dict)
+        captured["final_detections"] = [
+            {
+                "boxes":  list(d["boxes"].shape),
+                "labels": list(d["labels"].shape),
+                "scores": list(d["scores"].shape),
+                "n_dets": d["boxes"].shape[0],
+            }
+            for d in detections
+        ]
+
+    hooks.append(model.roi_heads.register_forward_hook(roi_heads_out_hook))
+
+    # ------------------------------------------------------------------
+    # Run real forward pass
+    # ------------------------------------------------------------------
     dummy_images = [
         torch.rand(3, image_height, image_width)
         for _ in range(batch_size)
     ]
-    print(f"\nInput: {batch_size} images [3, {image_height}, {image_width}], file: roi_heads.py")
 
     with torch.no_grad():
         predictions = model(dummy_images)
 
-    h1.remove(); h2.remove(); h3.remove()
+    for h in hooks:
+        h.remove()
 
-    print("\nfile: roi_heads.py, ROI Align output (MultiScaleRoIAlign):")
-    roi_out = roi_hook_data.get("roi_align_output")
-    if roi_out is not None:
-        print(f"  Shape: {list(roi_out.shape)}")
-        print(f"  → [total_proposals_across_batch, 256, 7, 7]")
+    # ------------------------------------------------------------------
+    # Print all captured real shapes
+    # ------------------------------------------------------------------
+    print(f"\nInput: {batch_size} images [{3}, {image_height}, {image_width}]")
 
-    print("\nTwoMLPHead output:")
-    head_out = roi_hook_data.get("box_head_output")
-    if head_out is not None:
-        print(f"  Shape: {list(head_out.shape)}")
-        print(f"  → [total_proposals, 1024]")
+    print(f"\nRPN → ROI Heads handoff:")
+    for i, shape in enumerate(captured.get("rpn_proposals", [])):
+        print(f"  Image {i} proposals from RPN : {shape}")
+    print(f"  Total proposals (all images) : {captured.get('rpn_proposal_total', '?')}")
 
-    print("\nFastRCNNPredictor output:")
-    cls = roi_hook_data.get("class_logits")
-    delta = roi_hook_data.get("box_deltas")
-    if cls is not None:
-        print(f"  class_logits : {list(cls.shape)}")
-        print(f"  → [total_proposals, {cls.shape[1]}]  ({cls.shape[1]} classes)")
-    if delta is not None:
-        print(f"  box_deltas   : {list(delta.shape)}")
-        print(f"  → [total_proposals, num_classes×4]")
+    print(f"\nMultiScaleRoIAlign (box_roi_pool):")
+    for i, shape in enumerate(captured.get("roi_pool_proposals_in", [])):
+        print(f"  Proposals in — image {i}    : {shape}")
+    print(f"  Total proposals fed in       : {captured.get('roi_pool_total_proposals', '?')}")
+    print(f"  ROI Align output             : {captured.get('roi_pool_output', '?')}")
+    print(f"  → [total_proposals, C, pool_h, pool_w]")
+    if "roi_pool_output" in captured:
+        s = captured["roi_pool_output"]
+        print(f"  → [{s[0]} proposals, {s[1]} channels, {s[2]}×{s[3]} pooled]")
+        print(f"  → will be flattened to {s[1]*s[2]*s[3]} features per proposal")
 
-    print(f"\nFinal detections per image (post-NMS):")
-    for i, pred in enumerate(predictions):
-        print(f"  Image {i}: {len(pred['boxes'])} boxes, "
-              f"labels={pred['labels'].tolist()[:5]}..., "
-              f"scores={[f'{s:.2f}' for s in pred['scores'].tolist()[:5]]}...")
+    print(f"\nTwoMLPHead (box_head):")
+    print(f"  Input  : {captured.get('box_head_input', '?')}")
+    print(f"  Output : {captured.get('box_head_output', '?')}")
+    print(f"  → FC({captured['box_head_input'][1] if 'box_head_input' in captured else '?'}"
+          f"→1024) → ReLU → FC(1024→1024) → ReLU")
 
-    print("="*60 + "\n")
-    return roi_hook_data, predictions
+    print(f"\nFastRCNNPredictor (box_predictor):")
+    print(f"  Input        : {captured.get('predictor_input', '?')}")
+    print(f"  class_logits : {captured.get('predictor_class_logits', '?')}")
+    print(f"  box_deltas   : {captured.get('predictor_box_deltas', '?')}")
+    n_cls = captured.get("num_classes", "?")
+    print(f"  → {n_cls} classes  |  {n_cls}×4={captured.get('num_classes_x4','?')} box coords")
+
+    print(f"\nFinal detections per image (post decode + NMS):")
+    for i, det in enumerate(captured.get("final_detections", [])):
+        print(f"  Image {i}:")
+        print(f"    boxes  : {det['boxes']}   ({det['n_dets']} detections)")
+        print(f"    labels : {det['labels']}")
+        print(f"    scores : {det['scores']}")
+
+    print("=" * 65 + "\n")
+    return captured, predictions

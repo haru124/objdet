@@ -54,83 +54,131 @@ def get_rpn_from_model(model):
     return model.rpn
 
 
-def debug_rpn(
-    image_height: int = 600,
-    image_width: int = 800,
-    batch_size: int = 2,
-):
+def debug_rpn(image_height: int = 600, image_width: int = 800, batch_size: int = 2):
     """
-    Run a full forward pass through Faster R-CNN in eval mode and
-    intercept the RPN outputs via a forward hook.
+    Hooks into:
+      - model.rpn.head        → captures objectness logits + bbox deltas
+                                 per FPN level (real tensors)
+      - model.rpn             → captures proposals list after NMS
+      - AnchorGenerator       → captures generated anchor counts
 
-    Prints:
-    - Objectness logits shape at each FPN level
-    - Box delta shape at each FPN level
-    - Number of proposals after NMS (per image)
-
-    Note: We use eval mode + no_grad so no loss is computed.
-    The hook captures intermediate RPN outputs that are not
-    returned by the public model() call.
+    Every shape/count printed comes from real tensors during forward pass.
     """
     from objdet.models.detector import build_faster_rcnn
 
-    print("\n" + "="*60)
-    print("DEBUG: RPN tensor flow, file: rpn.py")
-    print("="*60)
+    print("\n" + "=" * 65)
+    print("DEBUG: RPN — real tensor shapes from forward hooks")
+    print("=" * 65)
 
     cfg = ModelConfig(backbone_weights="none", num_classes=9)
     model = build_faster_rcnn(cfg)
     model.eval()
 
-    # ----------------------------------------------------------------
-    # Register a forward hook on the RPN head to capture its raw outputs
-    # before NMS. The hook stores the objectness logits and bbox deltas.
-    # ----------------------------------------------------------------
-    rpn_hook_data = {}
+    captured = {}
+    hooks = []
 
-    def _rpn_head_hook(module, inputs, outputs):
-        # RPNHead.forward returns (logits, bbox_deltas)
-        # logits     : list of [B, num_anchors, Hi, Wi]
-        # bbox_deltas: list of [B, num_anchors*4, Hi, Wi]
-        logits, deltas = outputs
-        rpn_hook_data["objectness_logits"] = logits
-        rpn_hook_data["bbox_deltas"] = deltas
+    # ------------------------------------------------------------------
+    # Hook on RPNHead
+    # RPNHead.forward(features) → (objectness_logits, pred_bbox_deltas)
+    # features: list of [B, 256, Hi, Wi] — one per FPN level
+    # objectness_logits: list of [B, num_anchors, Hi, Wi]
+    # pred_bbox_deltas:  list of [B, num_anchors*4, Hi, Wi]
+    # ------------------------------------------------------------------
+    def rpn_head_hook(module, inp, output):
+        logits, deltas = output
+        # inp[0] is the list of feature maps from FPN
+        captured["rpn_head_input_shapes"] = [list(f.shape) for f in inp[0]]
+        captured["rpn_objectness_logits"] = [list(t.shape) for t in logits]
+        captured["rpn_bbox_deltas"]       = [list(t.shape) for t in deltas]
+        captured["n_fpn_levels"]          = len(logits)
 
-    hook = model.rpn.head.register_forward_hook(_rpn_head_hook)
+    hooks.append(model.rpn.head.register_forward_hook(rpn_head_hook))
 
-    # Build dummy image list (Faster R-CNN expects a list of [C,H,W] tensors)
+    # ------------------------------------------------------------------
+    # Hook on AnchorGenerator
+    # AnchorGenerator.forward(image_list, feature_maps) → list of anchor tensors
+    # One tensor per image, each [total_anchors_across_levels, 4]
+    # ------------------------------------------------------------------
+    def anchor_hook(module, inp, output):
+        # output: list (one per image) of [N_anchors, 4]
+        captured["anchors_per_image"]  = [list(a.shape) for a in output]
+        captured["total_anchors"]      = [a.shape[0] for a in output]
+
+    hooks.append(model.rpn.anchor_generator.register_forward_hook(anchor_hook))
+
+    # ------------------------------------------------------------------
+    # Hook on the full RPN module
+    # RPN.forward returns (boxes, losses)
+    # In eval mode: boxes = list of [N_proposals, 4] per image
+    # ------------------------------------------------------------------
+    def rpn_full_hook(module, inp, output):
+        boxes, losses = output
+        # boxes is a list of tensors, one per image
+        captured["rpn_proposals_per_image"] = [list(b.shape) for b in boxes]
+        captured["rpn_proposal_counts"]     = [b.shape[0] for b in boxes]
+
+    hooks.append(model.rpn.register_forward_hook(rpn_full_hook))
+
+    # ------------------------------------------------------------------
+    # Run real forward pass
+    # model() in eval mode runs backbone → RPN → ROI heads
+    # All hooks fire during this single call
+    # ------------------------------------------------------------------
     dummy_images = [
         torch.rand(3, image_height, image_width)
         for _ in range(batch_size)
     ]
-    print(f"\nInput: {batch_size} images of shape [3, {image_height}, {image_width}], file: rpn.py")
 
     with torch.no_grad():
-        # In eval mode, model() returns predictions (boxes, labels, scores)
-        # The RPN proposals flow internally to ROI heads.
         predictions = model(dummy_images)
 
-    hook.remove()
+    for h in hooks:
+        h.remove()
 
-    # RPN head outputs (one tensor per FPN level)
-    print("\nfile: rpn.py - RPN Head outputs per FPN level:")
-    for i, (logits, deltas) in enumerate(zip(
-        rpn_hook_data["objectness_logits"],
-        rpn_hook_data["bbox_deltas"],
+    # ------------------------------------------------------------------
+    # Print captured real shapes
+    # ------------------------------------------------------------------
+    print(f"\nInput: {batch_size} images [{3}, {image_height}, {image_width}]")
+
+    print(f"\nRPN Head — inputs (FPN feature maps, one per level):")
+    for i, shape in enumerate(captured.get("rpn_head_input_shapes", [])):
+        print(f"  FPN level {i} → {shape}  (anchors_per_loc × 1 scores)")
+
+    print(f"\nRPN Head — objectness logits (one tensor per FPN level):")
+    for i, shape in enumerate(captured.get("rpn_objectness_logits", [])):
+        # shape: [B, num_anchors_per_location, Hi, Wi]
+        # num_anchors_per_location = 3 for FPN (3 aspect ratios, 1 scale per level)
+        n_anchors = shape[1]
+        hi, wi    = shape[2], shape[3]
+        total_at_level = n_anchors * hi * wi
+        print(f"  Level {i}: {shape}  "
+              f"({n_anchors} anchors/loc × {hi}×{wi} locs = {total_at_level} anchors)")
+
+    print(f"\nRPN Head — bbox deltas (one tensor per FPN level):")
+    for i, shape in enumerate(captured.get("rpn_bbox_deltas", [])):
+        # shape: [B, num_anchors*4, Hi, Wi]
+        print(f"  Level {i}: {shape}  ({shape[1]//4} anchors × 4 coords)")
+
+    print(f"\nAnchor Generator output:")
+    for i, (shape, total) in enumerate(zip(
+        captured.get("anchors_per_image", []),
+        captured.get("total_anchors", []),
     )):
-        print(f"  FPN level {i}:")
-        print(f"    objectness logits : {list(logits.shape)}, file: rpn.py")
-        #   [B, 3, Hi, Wi]  — 3 anchors per location, 1 score each
-        print(f"    bbox deltas       : {list(deltas.shape)}, file: rpn.py")
-        #   [B, 12, Hi, Wi] — 3 anchors × 4 (dx,dy,dw,dh) deltas
+        print(f"  Image {i}: {shape}  ({total:,} total anchors across all FPN levels)")
 
-    print(f"\n file: rpn.py - Proposals after NMS (eval mode, per image):")
-    # In eval mode, predictions contain final detections (post-ROI-heads).
-    # To see raw RPN proposals we'd need another hook on rpn.forward.
-    # Here we report final detection counts as a proxy.
+    print(f"\nRPN proposals after NMS (eval: up to 1000/image, train: up to 2000/image):")
+    for i, (shape, count) in enumerate(zip(
+        captured.get("rpn_proposals_per_image", []),
+        captured.get("rpn_proposal_counts", []),
+    )):
+        print(f"  Image {i}: {shape}  ({count} proposals survived NMS)")
+
+    print(f"\nFinal detections per image (post ROI-heads):")
     for i, pred in enumerate(predictions):
-        print(f"  Image {i}: {len(pred['boxes'])} final detections "
-              f"(post ROI-heads, score > 0.05), file: rpn.py")
+        print(f"  Image {i}: {pred['boxes'].shape[0]} detections  "
+              f"(scores range [{pred['scores'].min():.3f}, {pred['scores'].max():.3f}])"
+              if len(pred['scores']) > 0
+              else f"  Image {i}: 0 detections")
 
-    print("="*60 + "\n")
-    return rpn_hook_data, predictions
+    print("=" * 65 + "\n")
+    return captured, predictions
