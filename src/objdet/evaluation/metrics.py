@@ -49,6 +49,10 @@ class COCOEvaluator:
                         "labels":   output["labels"][keep_idx].cpu(),
                         "scores":   output["scores"][keep_idx].cpu(),
                     })
+                    #print("GT images:", len(self._ground_truths))
+                    #print("Pred images:", len(self._predictions))
+                    #print("Sample GT image_ids:", [g["image_id"] for g in self._ground_truths[:5]])
+                    #print("Sample Pred image_ids:", [p["image_id"] for p in self._predictions[:5]])
 
     def get_metrics(self) -> dict:
         """
@@ -104,14 +108,18 @@ class COCOEvaluator:
         class_n_gt:  dict = defaultdict(int)  # {class_idx: count} number of GT instances of that class across dataset
 
         for gt, pred in zip(self._ground_truths, self._predictions):
-            for lbl in gt["labels"].tolist():
-                class_n_gt[lbl] += 1
+            #zip together GT and predictions for each image, then iterate over predictions sorted by score 
+            # to determine TP/FP based on IoU with unmatched GT boxes of the same class.
+            # Accumulate (score, is_tp) for each predicted box in class_preds, and count total GT instances per class in class_n_gt.
+            # Finally compute AP per class and average
+            for lbl in gt["labels"].tolist(): 
+                class_n_gt[lbl] += 1  #all gts grouped by labels in the image
 
-            if len(pred["scores"]) == 0:
+            if len(pred["scores"]) == 0: # No predictions on this image → all GT are false negatives
                 continue
 
-            order = torch.argsort(pred["scores"], descending=True)
-            pred_boxes  = pred["boxes"][order]
+            order = torch.argsort(pred["scores"], descending=True) # Sort predictions by confidence score (descending)
+            pred_boxes  = pred["boxes"][order] # Reorder predicted boxes, labels, scores according to sorted order
             pred_labels = pred["labels"][order]
             pred_scores = pred["scores"][order]
 
@@ -119,7 +127,9 @@ class COCOEvaluator:
             for pb, pl, ps in zip(
                 pred_boxes, pred_labels.tolist(), pred_scores.tolist()
             ):
-                same_cls = (gt["labels"] == pl).nonzero(as_tuple=True)[0]
+                same_cls = (gt["labels"] == pl).nonzero(as_tuple=True)[0] # Find GT boxes of the same class as the current prediction
+                #0 means we want the indices of GT boxes where the label matches the predicted label pl. This gives us candidate GT boxes to compare against for IoU.
+                #same_cls looks like tensor([2, 5]) meaning GT boxes at indices 2 and 5 have the same class as the prediction.
                 best_iou, best_idx = 0.0, -1
                 for gi in same_cls.tolist():
                     if gi in matched_gt:
@@ -275,7 +285,7 @@ def _box_iou_single(box_a: torch.Tensor, box_b: torch.Tensor) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _voc_ap(precisions: list, recalls: list) -> float:
+def _voc_ap(precisions: list, recalls: list) -> float: 
     """11-point VOC interpolated AP."""
     ap = 0.0
     for t in [i / 10.0 for i in range(11)]:

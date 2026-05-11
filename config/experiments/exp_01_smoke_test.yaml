@@ -5,8 +5,8 @@
 experiment_name: exp_01_smoke_test
 
 training:
-  epochs: 1
-  batch_size: 1
+  epochs: 2
+  batch_size: 4
   optimizer: "sgd"
   learning_rate: 0.002
 
@@ -18,6 +18,12 @@ model:
 loss:
   classification: "cross_entropy"
   box_regression: "smooth_l1"
+
+checkpointing:
+  save_dir: outputs/checkpoints/  
+  save_every: 1                      # Save checkpoint every N epochs
+  keep_last: 3                       # How many checkpoints to retain
+
 
 logging:
   log_every: 100

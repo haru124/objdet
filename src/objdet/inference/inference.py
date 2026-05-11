@@ -13,13 +13,13 @@ Test-set evaluation pipeline. Loads a trained checkpoint and:
   7. Plots precision and recall for val + test
 
 Usage:
-    python -m objdet.inference.inference \
+    python -m src.objdet.inference.inference \
         --config  config/config.yaml \
         --exp     config/experiments/exp_01_smoke_test.yaml \
-        --ckpt    outputs/checkpoints/exp_01_smoke_test/exp_01_smoke_test_epoch_0002_loss_1.2340.pth \
+        --ckpt    PROJECT_ROOT/outputs/checkpoints/exp_01_smoke_test/exp_01_smoke_test_epoch_0002_loss_1.2340.pth \
         --n-samples 5 \
         --score-threshold 0.5 \
-        --output-dir outputs/inference/exp_01_smoke_test
+        --output-dir PROJECT_ROOT/outputs/inference/exp_01_smoke_test
 """
 
 import argparse
@@ -33,10 +33,12 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 
 # Make sure src/ is importable when running as a script
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
 
 from objdet.config.configuration import ConfigurationManager
-from objdet.datasets.dataloader import build_dataloader
+from objdet.datasets.dataloader import build_test_loader,build_dataloader
 from objdet.models.detector import get_model_on_device
 from objdet.evaluation.metrics import COCOEvaluator
 from objdet.utils.checkpoint import load_checkpoint
@@ -54,8 +56,8 @@ def run_inference(
     ckpt_path: str,
     n_samples: int = 5,
     score_threshold: float = 0.5,
-    output_dir: str = "outputs/inference",
-):
+    output_dir: str = PROJECT_ROOT / "outputs" / "inference",
+    split: str = "test"):
     """
     Full inference pipeline. Call from script or import directly.
     """
@@ -92,29 +94,35 @@ def run_inference(
     # Cityscapes "test" split has no annotations in the public release.
     # We use "val" as the held-out test set here, which is standard practice.
     # If you have the test annotations, change split="test".
-    test_loader = build_dataloader(
-        data_cfg=cfg.data,
-        split="val",        # change to "test" if annotations available
-        batch_size=1,       # batch_size=1 makes sample collection easy
-        shuffle=False,
-    )
-    print(f"[Inference] Test batches: {len(test_loader)}\n")
+    if split == "val":
+        inf_loader = build_dataloader(
+            data_cfg = cfg.data,  
+            split='val',
+            batch_size=1,
+            shuffle=False,  # no shuffling for val/test
+        )
+    else:
+        inf_loader = build_test_loader(
+            data_cfg=cfg.data,
+            batch_size=1,       # batch_size=1 makes sample collection easy
+        )
+    print(f"[Inference] Test batches: {len(inf_loader)}\n")
 
     # ── 4. Test Loss ───────────────────────────────────────────────────────
     print("─"*40)
     print("Computing test loss ...")
     print("─"*40)
-    test_losses = _compute_loss(model, test_loader, device)
-    _print_losses("TEST", test_losses)
+    inf_losses = _compute_loss(model, inf_loader, device)
+    _print_losses("TEST", inf_losses)
 
     # ── 5. Test mAP + per-class AP ─────────────────────────────────────────
     print("\n" + "─"*40)
     print("Computing test metrics ...")
     print("─"*40)
     evaluator = COCOEvaluator(device, cfg.eval)
-    evaluator.evaluate(model, test_loader)
-    test_metrics = evaluator.get_metrics()
-    _print_metrics("TEST", test_metrics)
+    evaluator.evaluate(model, inf_loader)
+    inf_metrics = evaluator.get_metrics()
+    _print_metrics("TEST", inf_metrics)
 
     # ── 6. Visualize sample images ─────────────────────────────────────────
     print(f"\n{'─'*40}")
@@ -122,7 +130,7 @@ def run_inference(
     print(f"{'─'*40}")
     _visualize_samples(
         model=model,
-        data_loader=test_loader,
+        data_loader=inf_loader,
         device=device,
         n_samples=n_samples,
         score_threshold=score_threshold,
@@ -131,33 +139,31 @@ def run_inference(
 
     # ── 7. Load training history ───────────────────────────────────────────
     # training_history.json is saved by Trainer alongside checkpoints
-    history_path = (
-        Path(cfg.checkpointing.save_dir) / cfg.experiment_name / "training_history.json"
-    )
+    history_path = Path(ckpt_path).parent / "training_history.json"
     history = _load_history(history_path)
 
     # ── 8. Loss plots ──────────────────────────────────────────────────────
     print(f"\n{'─'*40}")
     print("Plotting loss curves ...")
     print("─"*40)
-    _plot_loss_curves(history, test_losses, plot_dir)
+    _plot_loss_curves(history, inf_losses, plot_dir)
 
     # ── 9. mAP + metric plots ──────────────────────────────────────────────
     print("Plotting metric curves ...")
-    _plot_map_curves(history, test_metrics, plot_dir)
-    _plot_per_class_ap(history, test_metrics, plot_dir)
-    _plot_precision_recall(history, test_metrics, plot_dir)
+    _plot_map_curves(history, inf_metrics, plot_dir)
+    _plot_per_class_ap(history, inf_metrics, plot_dir)
+    _plot_precision_recall(history, inf_metrics, plot_dir)
 
     # ── 10. Save results JSON ──────────────────────────────────────────────
     results = {
         "experiment": cfg.experiment_name,
         "checkpoint": str(ckpt_path),
-        "test_losses": test_losses,
-        "test_metrics": {
-            k: v for k, v in test_metrics.items()
+        "inf_losses": inf_losses,
+        "inf_metrics": {
+            k: v for k, v in inf_metrics.items()
             if not isinstance(v, dict)
         },
-        "test_ap_per_class": test_metrics.get("ap_per_class", {}),
+        "test_ap_per_class": inf_metrics.get("ap_per_class", {}),
     }
     results_path = output_dir / "test_results.json"
     with open(results_path, "w") as f:
@@ -321,7 +327,7 @@ def _print_boxes(title: str, boxes, labels, scores=None):
 # PLOTTING
 # ===========================================================================
 
-def _plot_loss_curves(history: dict, test_losses: dict, plot_dir: Path):
+def _plot_loss_curves(history: dict, inf_losses: dict, plot_dir: Path):
     """
     3-panel subplot: Training Loss | Validation Loss | Test Loss
     Each panel shows 5 curves: total + 4 component losses.
@@ -380,7 +386,7 @@ def _plot_loss_curves(history: dict, test_losses: dict, plot_dir: Path):
     x_range = [0.2, 0.8]   # just a short horizontal span for clarity
 
     for key, style in loss_styles.items():
-        val = test_losses.get(key, None)
+        val = inf_losses.get(key, None)
         if val is not None and not np.isnan(val):
             ax.hlines(
                 y=val,
@@ -402,7 +408,7 @@ def _plot_loss_curves(history: dict, test_losses: dict, plot_dir: Path):
     print(f"[Plot] Loss curves → {out}")
 
 
-def _plot_map_curves(history: dict, test_metrics: dict, plot_dir: Path):
+def _plot_map_curves(history: dict, inf_metrics: dict, plot_dir: Path):
     """
     mAP curves for Train (not applicable — no train mAP tracked) and Val,
     plus test mAP as a dashed horizontal marker.
@@ -441,7 +447,7 @@ def _plot_map_curves(history: dict, test_metrics: dict, plot_dir: Path):
     metric_names = ["mAP@[.5:.95]", "mAP@0.50", "mAP@0.75"]
     metric_keys  = ["map", "map_50", "map_75"]
     colors       = ["#2c3e50", "#e74c3c", "#3498db"]
-    values       = [test_metrics.get(k, 0.0) for k in metric_keys]
+    values       = [inf_metrics.get(k, 0.0) for k in metric_keys]
 
     bars = ax.bar(metric_names, values, color=colors, alpha=0.85, width=0.5)
     for bar, val in zip(bars, values):
@@ -459,7 +465,7 @@ def _plot_map_curves(history: dict, test_metrics: dict, plot_dir: Path):
     print(f"[Plot] mAP curves → {out}")
 
 
-def _plot_per_class_ap(history: dict, test_metrics: dict, plot_dir: Path):
+def _plot_per_class_ap(history: dict, inf_metrics: dict, plot_dir: Path):
     """
     Per-class AP@0.5 grouped bar chart.
     Shows val AP (last epoch) vs test AP for each class.
@@ -469,7 +475,7 @@ def _plot_per_class_ap(history: dict, test_metrics: dict, plot_dir: Path):
     # Get last epoch val per-class AP
     val_ap_history = history.get("val", {}).get("ap_per_class", [])
     val_ap = val_ap_history[-1] if val_ap_history else {}
-    test_ap = test_metrics.get("ap_per_class", {})
+    test_ap = inf_metrics.get("ap_per_class", {})
 
     val_vals  = [val_ap.get(c, 0.0)  for c in classes]
     test_vals = [test_ap.get(c, 0.0) for c in classes]
@@ -509,7 +515,7 @@ def _plot_per_class_ap(history: dict, test_metrics: dict, plot_dir: Path):
     print(f"[Plot] Per-class AP → {out}")
 
 
-def _plot_precision_recall(history: dict, test_metrics: dict, plot_dir: Path):
+def _plot_precision_recall(history: dict, inf_metrics: dict, plot_dir: Path):
     """
     Precision and Recall bar chart for Validation (last epoch) vs Test.
     """
@@ -517,8 +523,8 @@ def _plot_precision_recall(history: dict, test_metrics: dict, plot_dir: Path):
     val_r_history = history.get("val", {}).get("recall", [])
     val_p  = val_p_history[-1]  if val_p_history  else 0.0
     val_r  = val_r_history[-1]  if val_r_history   else 0.0
-    test_p = test_metrics.get("precision", 0.0)
-    test_r = test_metrics.get("recall",    0.0)
+    test_p = inf_metrics.get("precision", 0.0)
+    test_r = inf_metrics.get("recall",    0.0)
 
     # Also plot val Precision/Recall over epochs if available
     val_epochs = history.get("val", {}).get("epoch", [])
@@ -610,6 +616,8 @@ def _parse_args():
     p.add_argument("--n-samples",        type=int,   default=5)
     p.add_argument("--score-threshold",  type=float, default=0.5)
     p.add_argument("--output-dir",       default="outputs/inference")
+    p.add_argument("--split",            default="test", choices=["val", "test"],
+                   help="Which data split to evaluate on (default: test). ")
     return p.parse_args()
 
 
@@ -622,4 +630,5 @@ if __name__ == "__main__":
         n_samples=args.n_samples,
         score_threshold=args.score_threshold,
         output_dir=args.output_dir,
+        split = args.split or "test", #if args.split not given, default to 'test', else use provided split (either 'val' or 'test')
     )

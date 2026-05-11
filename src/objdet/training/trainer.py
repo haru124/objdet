@@ -229,7 +229,8 @@ class Trainer:
             # ── Console summary ────────────────────────────────────────
             print(
                 f"\n[Epoch {epoch+1}] "
-                f"train_total={train_losses['total_loss']:.4f} | "
+                f"lr = {lr:.6f} | "
+                f"total_train_loss={train_losses['total_loss']:.4f} | "
                 f"cls={train_losses.get('loss_classifier', 0):.4f} | "
                 f"box={train_losses.get('loss_box_reg', 0):.4f} | "
                 f"obj={train_losses.get('loss_objectness', 0):.4f} | "
@@ -238,7 +239,7 @@ class Trainer:
             if run_val:
                 print(
                     f"[Epoch {epoch+1}] "
-                    f"val_total={val_losses['total_loss']:.4f} | "
+                    f"total_val_loss={val_losses['total_loss']:.4f} | "
                     f"mAP={val_metrics.get('map', 0):.4f} | "
                     f"mAP@50={val_metrics.get('map_50', 0):.4f} | "
                     f"mAP@75={val_metrics.get('map_75', 0):.4f} | "
