@@ -1,24 +1,27 @@
 """
 evaluation/metrics.py
-Now reads IoU thresholds and score_threshold from EvalConfig.
+
+Computes:
+  - mAP@[0.5:0.95], mAP@0.5, mAP@0.75
+  - Per-class AP
+  - Precision and Recall at each IoU threshold
 """
 
 import torch
 from torch.utils.data import DataLoader
 from objdet.entity.config_entity import EvalConfig
+from objdet.constants import CITYSCAPES_CLASSES
 
 
 class COCOEvaluator:
     def __init__(self, device: torch.device, eval_cfg: EvalConfig = None):
         self.device = device
-        # Use EvalConfig if provided, else fall back to defaults
-        if eval_cfg is None:
-            eval_cfg = EvalConfig()
-        self.eval_cfg = eval_cfg
+        self.eval_cfg = eval_cfg if eval_cfg is not None else EvalConfig()
         self._predictions = []
         self._ground_truths = []
 
     def evaluate(self, model: torch.nn.Module, data_loader: DataLoader):
+        """Collect predictions and ground truths in eval mode."""
         self._predictions.clear()
         self._ground_truths.clear()
         model.eval()
@@ -30,86 +33,98 @@ class COCOEvaluator:
 
                 for target, output in zip(targets, outputs):
                     img_id = target["image_id"].item()
-                    # Filter low-confidence predictions per eval config
-                    keep = output["scores"] >= self.eval_cfg.score_threshold #boolean tensor indicating which predictions to keep based on score threshold
-                    # Limit max detections per image
-                    keep_indices = keep.nonzero(as_tuple=True)[0] #keep is a boolean tensor, keep.nonzero() gives indices where it's True, as a 1D tensor, [0] to get the tensor of indices from the tuple
-                    keep_indices = keep_indices[:self.eval_cfg.max_detections]
+                    keep = output["scores"] >= self.eval_cfg.score_threshold # Filter predictions by score threshold
+                    keep_idx = keep.nonzero(as_tuple=True)[0][
+                        : self.eval_cfg.max_detections
+                    ] # Keep only top-k detections after thresholding
 
                     self._ground_truths.append({
                         "image_id": img_id,
-                        "boxes": target["boxes"].cpu(),
-                        "labels": target["labels"].cpu(),
+                        "boxes":    target["boxes"].cpu(),
+                        "labels":   target["labels"].cpu(),
                     })
                     self._predictions.append({
                         "image_id": img_id,
-                        "boxes": output["boxes"][keep_indices].cpu(),
-                        "labels": output["labels"][keep_indices].cpu(),
-                        "scores": output["scores"][keep_indices].cpu(),
+                        "boxes":    output["boxes"][keep_idx].cpu(),
+                        "labels":   output["labels"][keep_idx].cpu(),
+                        "scores":   output["scores"][keep_idx].cpu(),
                     })
 
-    def get_metrics(self) -> dict[str, float]:
+    def get_metrics(self) -> dict:
+        """
+        Returns:
+        {
+            "map":          float   mAP@[0.5:0.95]
+            "map_50":       float   mAP@0.5
+            "map_75":       float   mAP@0.75
+            "ap_per_class": {class_name: float}   AP@0.5 per class
+            "precision":    float   mean precision @ IoU=0.5
+            "recall":       float   mean recall @ IoU=0.5
+        }
+        """
         try:
-            return self._compute_map()
+            return self._compute_all_metrics()
         except Exception as e:
             print(f"[COCOEvaluator] Metric computation failed: {e}")
-            return {"map": 0.0, "map_50": 0.0, "map_75": 0.0}
+            return {
+                "map": 0.0, "map_50": 0.0, "map_75": 0.0,
+                "ap_per_class": {}, "precision": 0.0, "recall": 0.0,
+            }
 
-    def _compute_map(self) -> dict[str, float]:
-        # Use IoU thresholds from EvalConfig (configurable from YAML)
+    def _compute_all_metrics(self) -> dict:
         thresholds = self.eval_cfg.iou_thresholds
         ap_per_thresh = [self._mean_ap_at_iou(t) for t in thresholds]
 
-        map_all = sum(ap_per_thresh) / len(ap_per_thresh)
-
-        # mAP@50 and mAP@75 — find by threshold value, not index
-        def _ap_at(target_thresh):
+        def _at(target_t):
             for t, ap in zip(thresholds, ap_per_thresh):
-                if abs(t - target_thresh) < 1e-4: #find the AP corresponding to the target IoU threshold (e.g., 0.50 or 0.75)
+                if abs(t - target_t) < 1e-4:
                     return ap
             return 0.0
 
+        # Per-class AP at IoU=0.5
+        ap_per_class = self._ap_per_class_at_iou(0.5)
+
+        # Mean precision + recall at IoU=0.5
+        precision, recall = self._mean_precision_recall_at_iou(0.5)
+
         return {
-            "map":    map_all,
-            "map_50": _ap_at(0.50),
-            "map_75": _ap_at(0.75),
+            "map":          sum(ap_per_thresh) / len(ap_per_thresh),
+            "map_50":       _at(0.50),
+            "map_75":       _at(0.75),
+            "ap_per_class": ap_per_class,
+            "precision":    precision,
+            "recall":       recall,
         }
 
-    # _mean_ap_at_iou, _box_iou_single, _voc_ap — unchanged from original
-    # (kept here for completeness in your file)
     def _mean_ap_at_iou(self, iou_threshold: float) -> float:
+        """mAP across all classes at a single IoU threshold."""
         from collections import defaultdict
-        class_preds: dict[int, list] = defaultdict(list) 
-        #dict[int, list] means a dictionary where keys are integers (class labels) and values are lists of tuples (score, tp). 
-        # defaultdict(list) means that if we access a key that doesn't exist, it will return an empty list instead of raising a KeyError.
-        class_n_gt: dict[int, int] = defaultdict(int)
+
+        class_preds: dict = defaultdict(list) # {class_idx: [(score, is_tp), ...]} for all predictions of that class across dataset
+        class_n_gt:  dict = defaultdict(int)  # {class_idx: count} number of GT instances of that class across dataset
 
         for gt, pred in zip(self._ground_truths, self._predictions):
-            gt_boxes = gt["boxes"]
-            gt_labels = gt["labels"]
-            pred_boxes = pred["boxes"]
-            pred_labels = pred["labels"]
-            pred_scores = pred["scores"]
+            for lbl in gt["labels"].tolist():
+                class_n_gt[lbl] += 1
 
-            for lbl in gt_labels.tolist(): #.tolist() converts the tensor of labels to a regular Python list, so we can iterate over it.
-                class_n_gt[lbl] += 1 #count the number of ground truth instances for each class label across the dataset, storing it in class_n_gt.
-
-            if len(pred_scores) == 0:
+            if len(pred["scores"]) == 0:
                 continue
 
-            order = torch.argsort(pred_scores, descending=True)
-            pred_boxes = pred_boxes[order]
-            pred_labels = pred_labels[order]
-            pred_scores = pred_scores[order]
+            order = torch.argsort(pred["scores"], descending=True)
+            pred_boxes  = pred["boxes"][order]
+            pred_labels = pred["labels"][order]
+            pred_scores = pred["scores"][order]
 
             matched_gt = set()
-            for pb, pl, ps in zip(pred_boxes, pred_labels.tolist(), pred_scores.tolist()):
-                same_cls = (gt_labels == pl).nonzero(as_tuple=True)[0] #find indices of gt boxes that have the same class label as the current prediction (pl).
+            for pb, pl, ps in zip(
+                pred_boxes, pred_labels.tolist(), pred_scores.tolist()
+            ):
+                same_cls = (gt["labels"] == pl).nonzero(as_tuple=True)[0]
                 best_iou, best_idx = 0.0, -1
                 for gi in same_cls.tolist():
                     if gi in matched_gt:
                         continue
-                    iou = _box_iou_single(pb, gt_boxes[gi])
+                    iou = _box_iou_single(pb, gt["boxes"][gi])
                     if iou > best_iou:
                         best_iou, best_idx = iou, gi
                 tp = 1 if best_iou >= iou_threshold and best_idx >= 0 else 0
@@ -118,26 +133,137 @@ class COCOEvaluator:
                 class_preds[pl].append((ps, tp))
 
         aps = []
-        for cls, preds_list in class_preds.items(): #iterate over each class and its list of predictions (score, tp)
-            n_gt = class_n_gt.get(cls, 0) #number of ground truth instances for this class, default to 0 if not found
+        for cls, preds_list in class_preds.items():
+            n_gt = class_n_gt.get(cls, 0)
             if n_gt == 0:
                 continue
-            preds_list.sort(key=lambda x: -x[0]) #preds_list is a list of tuples (score, tp), we sort it in descending order of score (x[0] is the score, -x[0] for descending)
+            preds_list.sort(key=lambda x: -x[0])
             tp_cum = fp_cum = 0
-            precisions, recalls = [], []
+            precs, recs = [], []
             for _, tp in preds_list:
-                if tp:
-                    tp_cum += 1
-                else:
-                    fp_cum += 1
-                precisions.append(tp_cum / (tp_cum + fp_cum))
-                recalls.append(tp_cum / n_gt)
-            aps.append(_voc_ap(precisions, recalls))
+                tp_cum += tp; fp_cum += (1 - tp)
+                precs.append(tp_cum / (tp_cum + fp_cum))
+                recs.append(tp_cum / n_gt)
+            aps.append(_voc_ap(precs, recs))
 
         return sum(aps) / len(aps) if aps else 0.0
 
+    def _ap_per_class_at_iou(self, iou_threshold: float) -> dict:
+        """
+        Returns {class_name: AP_float} for each class present in ground truth.
+        Uses CITYSCAPES_CLASSES for name lookup.
+        """
+        from collections import defaultdict
 
-def _box_iou_single(box_a, box_b) -> float:
+        class_preds: dict = defaultdict(list)
+        class_n_gt:  dict = defaultdict(int)
+
+        for gt, pred in zip(self._ground_truths, self._predictions):
+            for lbl in gt["labels"].tolist():
+                class_n_gt[lbl] += 1
+
+            if len(pred["scores"]) == 0:
+                continue
+
+            order = torch.argsort(pred["scores"], descending=True)
+            pred_boxes  = pred["boxes"][order]
+            pred_labels = pred["labels"][order]
+            pred_scores = pred["scores"][order]
+
+            matched_gt = set()
+            for pb, pl, ps in zip(
+                pred_boxes, pred_labels.tolist(), pred_scores.tolist()
+            ):
+                same_cls = (gt["labels"] == pl).nonzero(as_tuple=True)[0]
+                best_iou, best_idx = 0.0, -1
+                for gi in same_cls.tolist():
+                    if gi in matched_gt:
+                        continue
+                    iou = _box_iou_single(pb, gt["boxes"][gi])
+                    if iou > best_iou:
+                        best_iou, best_idx = iou, gi
+                tp = 1 if best_iou >= iou_threshold and best_idx >= 0 else 0
+                if tp:
+                    matched_gt.add(best_idx)
+                class_preds[pl].append((ps, tp))
+
+        ap_per_class = {}
+        for cls_idx in sorted(class_n_gt.keys()):
+            n_gt = class_n_gt[cls_idx]
+            cls_name = (
+                CITYSCAPES_CLASSES[cls_idx]
+                if cls_idx < len(CITYSCAPES_CLASSES)
+                else str(cls_idx)
+            )
+            preds_list = class_preds.get(cls_idx, [])
+            if n_gt == 0 or not preds_list:
+                ap_per_class[cls_name] = 0.0
+                continue
+            preds_list.sort(key=lambda x: -x[0])
+            tp_cum = fp_cum = 0
+            precs, recs = [], []
+            for _, tp in preds_list:
+                tp_cum += tp; fp_cum += (1 - tp)
+                precs.append(tp_cum / (tp_cum + fp_cum))
+                recs.append(tp_cum / n_gt)
+            ap_per_class[cls_name] = _voc_ap(precs, recs)
+
+        return ap_per_class
+
+    def _mean_precision_recall_at_iou(
+        self, iou_threshold: float
+    ) -> tuple[float, float]:
+        """
+        Compute overall precision and recall at a fixed IoU threshold
+        by treating all classes together.
+        Precision = TP / (TP + FP)
+        Recall    = TP / (TP + FN)
+        """
+        tp_total = fp_total = fn_total = 0
+
+        for gt, pred in zip(self._ground_truths, self._predictions):
+            gt_boxes  = gt["boxes"]
+            gt_labels = gt["labels"]
+            pred_boxes  = pred["boxes"]
+            pred_labels = pred["labels"]
+            pred_scores = pred["scores"]
+
+            if len(pred_scores) == 0:
+                fn_total += len(gt_labels)
+                continue
+
+            order = torch.argsort(pred_scores, descending=True)
+            pred_boxes  = pred_boxes[order]
+            pred_labels = pred_labels[order]
+
+            matched_gt = set()
+            for pb, pl in zip(pred_boxes, pred_labels.tolist()):
+                same_cls = (gt_labels == pl).nonzero(as_tuple=True)[0]
+                best_iou, best_idx = 0.0, -1
+                for gi in same_cls.tolist():
+                    if gi in matched_gt:
+                        continue
+                    iou = _box_iou_single(pb, gt_boxes[gi])
+                    if iou > best_iou:
+                        best_iou, best_idx = iou, gi
+                if best_iou >= iou_threshold and best_idx >= 0:
+                    tp_total += 1
+                    matched_gt.add(best_idx)
+                else:
+                    fp_total += 1
+
+            fn_total += len(gt_labels) - len(matched_gt)
+
+        precision = tp_total / (tp_total + fp_total + 1e-8)
+        recall    = tp_total / (tp_total + fn_total + 1e-8)
+        return precision, recall
+
+
+# ---------------------------------------------------------------------------
+# Standalone helpers
+# ---------------------------------------------------------------------------
+
+def _box_iou_single(box_a: torch.Tensor, box_b: torch.Tensor) -> float:
     inter_x1 = max(box_a[0].item(), box_b[0].item())
     inter_y1 = max(box_a[1].item(), box_b[1].item())
     inter_x2 = min(box_a[2].item(), box_b[2].item())
@@ -149,9 +275,10 @@ def _box_iou_single(box_a, box_b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def _voc_ap(precisions, recalls) -> float: #compute Average Precision using the 11-point interpolation method
+def _voc_ap(precisions: list, recalls: list) -> float:
+    """11-point VOC interpolated AP."""
     ap = 0.0
-    for t in [i / 10.0 for i in range(11)]: #t takes values 0.0, 0.1, ..., 1.0
+    for t in [i / 10.0 for i in range(11)]:
         p_at_t = [p for p, r in zip(precisions, recalls) if r >= t]
         ap += max(p_at_t) if p_at_t else 0.0
     return ap / 11.0
