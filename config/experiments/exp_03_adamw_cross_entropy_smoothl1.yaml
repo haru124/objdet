@@ -1,0 +1,31 @@
+# =============================================================================
+# Experiment 03 — AdamW with Cross Entropy and Smooth L1
+# Overrides only what differs from config.yaml
+# =============================================================================
+experiment_name: exp_03_adamw_cross_entropy_smoothl1
+
+training:
+  epochs: 10
+  batch_size: 4
+  optimizer: "adamw"
+  learning_rate: 0.0001
+  momentum: 0.0              # not used by AdamW, but set explicitly for clarity
+
+model:
+  backbone_weights: "local"
+  local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
+  load_backbone_only: false   # true = Load only the ResNet50 body weights, not the RPN or ROI heads, for faster iteration during early experimentation
+  trainable_backbone_layers: 1    # freeze more layers for faster iteration
+
+loss:
+  classification: "cross_entropy"
+  box_regression: "smooth_l1"
+
+checkpointing:
+  save_dir: outputs/checkpoints/  
+  save_every: 1                      # Save checkpoint every N epochs
+  keep_last: 3                       # How many checkpoints to retain
+
+
+logging:
+  log_every: 100  # Log training metrics every N iterations (batches)

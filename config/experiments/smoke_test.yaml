@@ -1,0 +1,35 @@
+# =============================================================================
+# Smoke test — verifies the full pipeline runs without errors
+# Uses 100 train samples, 20 val samples, 2 epochs
+# Purpose: catch bugs quickly before committing to a full run
+# NOT for evaluating model quality — results are meaningless at this scale
+# =============================================================================
+experiment_name: smoke_test
+
+data:
+  max_samples: 100          # only 100 training images
+  num_workers: 2
+
+training:
+  epochs: 2
+  batch_size: 2
+  optimizer: "sgd"
+  learning_rate: 0.002
+
+
+model:
+  backbone_weights: "local"
+  local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
+  load_backbone_only: false
+  trainable_backbone_layers: 1
+
+loss:
+  classification: "cross_entropy"
+  box_regression: "smooth_l1"
+
+checkpointing:
+  save_every: 1
+  keep_last: 2
+
+logging:
+  log_every: 10             # log more frequently since fewer batches
