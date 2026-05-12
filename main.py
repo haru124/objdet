@@ -113,12 +113,12 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--split", default="val",
+        "--split", default="test",
         choices=["val", "test"],
         help=(
             "[inference] Dataset split to evaluate on.\n"
-            "Use 'val' (default) for Cityscapes since public test has no annotations.\n"
-            "Use 'test' if you have annotated test data."
+            "Use 'test' by default. Use 'val' only when you explicitly want\n"
+            "to evaluate on the validation split (e.g. standalone inference)."
         ),
     )
 
@@ -307,7 +307,7 @@ def _run_inference(args, cfg, ckpt_override: Path = None):
         n_samples=args.n_samples,
         score_threshold=args.score_threshold,
         output_dir=output_dir,
-        split=args.split,
+        split=("test" if args.mode == "train" and args.run_inference_after else args.split),
         tb_log_dir=cfg.logging.tensorboard_dir,     
         mlflow_uri=cfg.logging.mlflow_tracking_uri, 
     )
