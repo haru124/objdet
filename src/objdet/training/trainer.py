@@ -190,6 +190,7 @@ class Trainer:
         self.start_epoch = load_checkpoint(
             checkpoint_path, self.model, self.optimizer, self.scheduler
         )
+        self.global_step = self.start_epoch * len(self.train_loader)
         # Restore history so plots are continuous across resumed runs
         if self.history_path.exists():
             with open(self.history_path, "r") as f:
@@ -323,19 +324,19 @@ class Trainer:
                     metrics_to_log.update(
                         {f"val_{k}": val_losses.get(k, 0.0) for k in self.LOSS_KEYS}
                     )
-                _mlflow_metric_names = {
-                    "map":       "val_mAP_5_95",    # mlflow keys cannot have special chars
-                    "map_50":    "val_mAP_5",
-                    "map_75":    "val_mAP_75",
-                    "precision": "val_precision",
-                    "recall":    "val_recall",
-                }
-                for key, mlkey in _mlflow_metric_names.items():
-                    if key in val_metrics:
-                        metrics_to_log[mlkey] = val_metrics[key]
+                    _mlflow_metric_names = {
+                        "map":       "val_mAP_5_95",    # mlflow keys cannot have special chars
+                        "map_50":    "val_mAP_50",
+                        "map_75":    "val_mAP_75",
+                        "precision": "val_precision",
+                        "recall":    "val_recall",
+                    }
+                    for key, mlkey in _mlflow_metric_names.items():
+                        if key in val_metrics:
+                            metrics_to_log[mlkey] = val_metrics[key]
 
-                for cls_name, ap_val in val_metrics.get("ap_per_class", {}).items():
-                    metrics_to_log[f"ap_{cls_name}"] = ap_val
+                    for cls_name, ap_val in val_metrics.get("ap_per_class", {}).items():
+                        metrics_to_log[f"ap_{cls_name}"] = ap_val
                 
                 self.mlf_logger.log_metrics(metrics_to_log, step=epoch)
 

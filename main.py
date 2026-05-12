@@ -308,6 +308,8 @@ def _run_inference(args, cfg, ckpt_override: Path = None):
         score_threshold=args.score_threshold,
         output_dir=output_dir,
         split=args.split,
+        tb_log_dir=cfg.logging.tensorboard_dir,     
+        mlflow_uri=cfg.logging.mlflow_tracking_uri, 
     )
 
 

@@ -10,6 +10,7 @@ data:
   annotations_dir: data/gtFine
   num_workers: 4                    # DataLoader(read img, decode, resize, augment, convert to tensors batchwise) workers for parallel loading ~ no of CPU cores else GPU may starve for data
   pin_memory: true                  # Speeds up data loading on GPU; Speeds up transfer from CPU RAM → GPU VRAM.
+  max_samples: null                 # For debugging: limit number of samples (images) to load, set to null for no limit 
 
 model:
   num_classes: 9                     # 8 Cityscapes classes + background
@@ -57,7 +58,7 @@ training:
 
 #-----loss
 # faster rcnn has 4 internal losses- rpn classification loss, rpn regression loss, roi head classification loss, roi head regression loss
-#this section lets u swap: classification loss:  "cross entropy" | "focal loss" 
+#this section lets u swap: classification loss:  "cross entropy" | "focal" 
 # box_regression loss: "smooth l1" | "l1" | "giou" | "diou" | "ciou"
 loss:
   classification: "cross_entropy"     # "cross_entropy" | "focal_loss"
@@ -100,10 +101,3 @@ profiler:
   active: 3       # Number of epochs to profile (record results)
   output_dir: outputs/profiler
 
-
-#------------debug----
-debug:
-  enabled: false
-  image_height: 600
-  image_width: 800
-  batch_size: 2

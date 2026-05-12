@@ -13,6 +13,7 @@ class DataConfig:
     annotations_dir: str = "data/gtFine"
     num_workers: int = 4
     pin_memory: bool = True
+    max_samples: Optional[int] = None   # For debugging: limit number of samples (images) to load, set to null for no limit
 
     # Resolved paths — populated by __post_init__, NOT from YAML directly
     images_path: Path = field(default_factory=Path, init=False)
@@ -133,17 +134,6 @@ class ProfilerConfig:
 
 
 # ---------------------------------------------------------------------------
-# DEBUG
-# ---------------------------------------------------------------------------
-@dataclass
-class DebugConfig:
-    enabled: bool = False
-    image_height: int = 600
-    image_width: int = 800
-    batch_size: int = 2
-
-
-# ---------------------------------------------------------------------------
 # TOP-LEVEL PIPELINE CONFIG
 # ---------------------------------------------------------------------------
 @dataclass
@@ -158,4 +148,4 @@ class TrainingPipelineConfig:
     checkpointing: CheckpointingConfig = field(default_factory=CheckpointingConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
-    debug: DebugConfig = field(default_factory=DebugConfig)
+    

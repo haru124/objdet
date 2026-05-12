@@ -100,68 +100,13 @@ class COCOEvaluator:
             "recall":       recall,
         }
 
-    def _mean_ap_at_iou(self, iou_threshold: float) -> float:
-        """mAP across all classes at a single IoU threshold."""
-        from collections import defaultdict
-
-        class_preds: dict = defaultdict(list) # {class_idx: [(score, is_tp), ...]} for all predictions of that class across dataset
-        class_n_gt:  dict = defaultdict(int)  # {class_idx: count} number of GT instances of that class across dataset
-
-        for gt, pred in zip(self._ground_truths, self._predictions):
-            #zip together GT and predictions for each image, then iterate over predictions sorted by score 
-            # to determine TP/FP based on IoU with unmatched GT boxes of the same class.
-            # Accumulate (score, is_tp) for each predicted box in class_preds, and count total GT instances per class in class_n_gt.
-            # Finally compute AP per class and average
-            for lbl in gt["labels"].tolist(): 
-                class_n_gt[lbl] += 1  #all gts grouped by labels in the image
-
-            if len(pred["scores"]) == 0: # No predictions on this image → all GT are false negatives
-                continue
-
-            order = torch.argsort(pred["scores"], descending=True) # Sort predictions by confidence score (descending)
-            pred_boxes  = pred["boxes"][order] # Reorder predicted boxes, labels, scores according to sorted order
-            pred_labels = pred["labels"][order]
-            pred_scores = pred["scores"][order]
-
-            matched_gt = set()
-            for pb, pl, ps in zip(
-                pred_boxes, pred_labels.tolist(), pred_scores.tolist()
-            ):
-                same_cls = (gt["labels"] == pl).nonzero(as_tuple=True)[0] # Find GT boxes of the same class as the current prediction
-                #0 means we want the indices of GT boxes where the label matches the predicted label pl. This gives us candidate GT boxes to compare against for IoU.
-                #same_cls looks like tensor([2, 5]) meaning GT boxes at indices 2 and 5 have the same class as the prediction.
-                best_iou, best_idx = 0.0, -1
-                for gi in same_cls.tolist():
-                    if gi in matched_gt:
-                        continue
-                    iou = _box_iou_single(pb, gt["boxes"][gi])
-                    if iou > best_iou:
-                        best_iou, best_idx = iou, gi
-                tp = 1 if best_iou >= iou_threshold and best_idx >= 0 else 0
-                if tp:
-                    matched_gt.add(best_idx)
-                class_preds[pl].append((ps, tp))
-
-        aps = []
-        for cls, preds_list in class_preds.items():
-            n_gt = class_n_gt.get(cls, 0)
-            if n_gt == 0:
-                continue
-            preds_list.sort(key=lambda x: -x[0])
-            tp_cum = fp_cum = 0
-            precs, recs = [], []
-            for _, tp in preds_list:
-                tp_cum += tp; fp_cum += (1 - tp)
-                precs.append(tp_cum / (tp_cum + fp_cum))
-                recs.append(tp_cum / n_gt)
-            aps.append(_voc_ap(precs, recs))
-
-        return sum(aps) / len(aps) if aps else 0.0
-
-    def _ap_per_class_at_iou(self, iou_threshold: float) -> dict:
+    def _build_matches(self, iou_threshold: float) -> tuple[dict, dict]:
         """
-        Returns {class_name: AP_float} for each class present in ground truth.
-        Uses CITYSCAPES_CLASSES for name lookup.
+        Single shared matching loop used by all AP computations.
+
+        Returns:
+            class_preds : {cls_idx: [(score, is_tp), ...]}
+            class_n_gt  : {cls_idx: int}
         """
         from collections import defaultdict
 
@@ -175,15 +120,13 @@ class COCOEvaluator:
             if len(pred["scores"]) == 0:
                 continue
 
-            order = torch.argsort(pred["scores"], descending=True)
+            order       = torch.argsort(pred["scores"], descending=True)
             pred_boxes  = pred["boxes"][order]
             pred_labels = pred["labels"][order]
             pred_scores = pred["scores"][order]
 
             matched_gt = set()
-            for pb, pl, ps in zip(
-                pred_boxes, pred_labels.tolist(), pred_scores.tolist()
-            ):
+            for pb, pl, ps in zip(pred_boxes, pred_labels.tolist(), pred_scores.tolist()):
                 same_cls = (gt["labels"] == pl).nonzero(as_tuple=True)[0]
                 best_iou, best_idx = 0.0, -1
                 for gi in same_cls.tolist():
@@ -196,6 +139,35 @@ class COCOEvaluator:
                 if tp:
                     matched_gt.add(best_idx)
                 class_preds[pl].append((ps, tp))
+
+        return class_preds, class_n_gt
+
+
+    def _mean_ap_at_iou(self, iou_threshold: float) -> float:
+        """mAP across all classes at a single IoU threshold."""
+        class_preds, class_n_gt = self._build_matches(iou_threshold)
+
+        aps = []
+        for cls, preds_list in class_preds.items():
+            n_gt = class_n_gt.get(cls, 0)
+            if n_gt == 0:
+                continue
+            preds_list.sort(key=lambda x: -x[0])
+            tp_cum = fp_cum = 0
+            precs, recs = [], []
+            for _, tp in preds_list:
+                tp_cum += tp
+                fp_cum += (1 - tp)
+                precs.append(tp_cum / (tp_cum + fp_cum))
+                recs.append(tp_cum / n_gt)
+            aps.append(_voc_ap(precs, recs))
+
+        return sum(aps) / len(aps) if aps else 0.0
+
+
+    def _ap_per_class_at_iou(self, iou_threshold: float) -> dict:
+        """Returns {class_name: AP_float} for each class present in ground truth."""
+        class_preds, class_n_gt = self._build_matches(iou_threshold)
 
         ap_per_class = {}
         for cls_idx in sorted(class_n_gt.keys()):
@@ -213,7 +185,8 @@ class COCOEvaluator:
             tp_cum = fp_cum = 0
             precs, recs = [], []
             for _, tp in preds_list:
-                tp_cum += tp; fp_cum += (1 - tp)
+                tp_cum += tp
+                fp_cum += (1 - tp)
                 precs.append(tp_cum / (tp_cum + fp_cum))
                 recs.append(tp_cum / n_gt)
             ap_per_class[cls_name] = _voc_ap(precs, recs)

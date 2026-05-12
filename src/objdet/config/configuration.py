@@ -4,7 +4,7 @@ import yaml
 
 from objdet.entity.config_entity import (
     DataConfig, ModelConfig, TrainingConfig, LossConfig, EvalConfig,
-    CheckpointingConfig, LoggingConfig, ProfilerConfig, DebugConfig,
+    CheckpointingConfig, LoggingConfig, ProfilerConfig,
     TrainingPipelineConfig,
 )
 
@@ -53,7 +53,6 @@ class ConfigurationManager:
             checkpointing=self._checkpointing_config(r.get("checkpointing", {})),
             logging=self._logging_config(r.get("logging", {})),
             profiler=self._profiler_config(r.get("profiler", {})),
-            debug=self._debug_config(r.get("debug", {})),
         )
 
     # ------------------------------------------------------------------
@@ -67,6 +66,7 @@ class ConfigurationManager:
             annotations_dir=d.get("annotations_dir", "data/gtFine"),
             num_workers=d.get("num_workers", 4),
             pin_memory=d.get("pin_memory", True),
+            max_samples=d.get("max_samples", None),
         )
 
     @staticmethod
@@ -143,11 +143,3 @@ class ConfigurationManager:
             output_dir=d.get("output_dir", "outputs/profiler/"),
         )
 
-    @staticmethod
-    def _debug_config(d: dict) -> DebugConfig:
-        return DebugConfig(
-            enabled=d.get("enabled", False),
-            image_height=d.get("image_height", 600),
-            image_width=d.get("image_width", 800),
-            batch_size=d.get("batch_size", 2),
-        )

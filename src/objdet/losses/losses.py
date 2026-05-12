@@ -254,7 +254,7 @@ def build_cls_loss_fn(loss_cfg: LossConfig):
     if loss_cfg.classification == "cross_entropy":
         return cross_entropy_loss
 
-    elif loss_cfg.classification == "focal":
+    elif loss_cfg.classification in ("focal", "focal_loss"):
         alpha = loss_cfg.focal_alpha
         gamma = loss_cfg.focal_gamma
 
@@ -338,7 +338,7 @@ def patch_roi_head_losses(model, loss_cfg: LossConfig):
     cls_loss_fn = build_cls_loss_fn(loss_cfg)
     box_loss_fn = build_box_loss_fn(loss_cfg)
     uses_iou_loss = loss_cfg.box_regression in ("giou", "diou", "ciou")
-
+    _warned = False
     print(
         f"[Losses] Patching ROI head losses: "
         f"cls={loss_cfg.classification}, "
@@ -375,7 +375,7 @@ def patch_roi_head_losses(model, loss_cfg: LossConfig):
             return classification_loss, box_loss
 
         num_classes = box_regression.shape[1] // 4
-
+        nonlocal _warned
         if uses_iou_loss:
             # IoU losses require DECODED xyxy boxes, not delta encodings.
             # We decode using the box_coder from model.roi_heads.box_coder.
@@ -391,14 +391,17 @@ def patch_roi_head_losses(model, loss_cfg: LossConfig):
             # PRACTICAL NOTE: For production IoU-based regression in Faster
             # R-CNN, subclass RoIHeads and override forward(). For now,
             # we fall back to smooth_l1 for the regression term and log a warning.
-            import warnings
-            warnings.warn(
-                f"[Losses] {loss_cfg.box_regression} loss requires decoded xyxy "
-                "boxes, which are not available in the fastrcnn_loss() patch. "
-                "Falling back to smooth_l1 for box regression. "
-                "To use IoU losses properly, subclass RoIHeads."
-            )
+            if not _warned:
+                import warnings
+                warnings.warn(
+                    f"[Losses] {loss_cfg.box_regression} loss requires decoded xyxy "
+                    "boxes, which are not available in the fastrcnn_loss() patch. "
+                    "Falling back to smooth_l1 for box regression. "
+                    "To use IoU losses properly, subclass RoIHeads."
+                )
+                _warned = True
             box_loss_fn_actual = lambda p, t: smooth_l1_loss(p, t, beta=1.0)
+            
         else:
             box_loss_fn_actual = box_loss_fn
 
