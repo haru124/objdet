@@ -5,8 +5,8 @@
 experiment_name: exp_01_smoke_test
 
 training:
-  epochs: 2
-  batch_size: 4
+  epochs: 10
+  batch_size: 3
   optimizer: "sgd"
   learning_rate: 0.002
 

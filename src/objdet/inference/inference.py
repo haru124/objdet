@@ -44,6 +44,8 @@ from objdet.evaluation.metrics import COCOEvaluator
 from objdet.utils.checkpoint import load_checkpoint
 from objdet.utils.visualization import draw_predictions_vs_gt, draw_class_legend
 from objdet.constants import CITYSCAPES_CLASSES
+from objdet.tracking.tensorboard_logger import TensorBoardLogger
+from objdet.tracking.mlflow_logger import MLflowLogger
 
 
 # ===========================================================================
@@ -57,7 +59,9 @@ def run_inference(
     n_samples: int = 5,
     score_threshold: float = 0.5,
     output_dir: str = PROJECT_ROOT / "outputs" / "inference",
-    split: str = "test"):
+    split: str = "test",
+    tb_log_dir: str | None = None,
+    mlflow_uri: str | None = None):
     """
     Full inference pipeline. Call from script or import directly.
     """
@@ -73,6 +77,17 @@ def run_inference(
         base_config_path=config_path,
         experiment_config_path=exp_path,
     ).get_config()
+
+    tb_logger = TensorBoardLogger(
+        log_dir=tb_log_dir or cfg.logging.tensorboard_dir,
+        experiment_name=cfg.experiment_name,
+    ) if tb_log_dir or cfg.logging.tensorboard_dir else None
+
+    mlf_logger = MLflowLogger(
+        tracking_uri=mlflow_uri or cfg.logging.mlflow_tracking_uri,
+        experiment_name=cfg.project_name,
+        run_name=f"{cfg.experiment_name}_inference",
+    ) if True else None
 
     device = torch.device(
         cfg.training.device if torch.cuda.is_available() else "cpu"
@@ -123,6 +138,9 @@ def run_inference(
     evaluator.evaluate(model, inf_loader)
     inf_metrics = evaluator.get_metrics()
     _print_metrics("TEST", inf_metrics)
+
+    _log_test_results_to_tensorboard(tb_logger, inf_losses, inf_metrics)
+    _log_test_results_to_mlflow(mlf_logger, inf_losses, inf_metrics)
 
     # ── 6. Visualize sample images ─────────────────────────────────────────
     print(f"\n{'─'*40}")
@@ -221,6 +239,52 @@ def _compute_loss(model, data_loader, device) -> dict:
     model.eval()    # switch back to eval mode for prediction
     n = max(n_batches, 1)
     return {k: v / n for k, v in accum.items()}
+
+
+def _log_test_results_to_tensorboard(tb_logger, inf_losses, inf_metrics):
+    if tb_logger is None:
+        return
+    # Use step=0 — test is a single point, not a timeseries
+    tb_logger.log_scalar("test/total_loss",    inf_losses["total_loss"],       0)
+    tb_logger.log_scalar("test/loss_cls",      inf_losses["loss_classifier"],  0)
+    tb_logger.log_scalar("test/loss_box_reg",  inf_losses["loss_box_reg"],     0)
+    tb_logger.log_scalar("test/loss_obj",      inf_losses["loss_objectness"],  0)
+    tb_logger.log_scalar("test/loss_rpn_box",  inf_losses["loss_rpn_box_reg"], 0)
+
+    tb_logger.log_scalar("test/mAP[.5:.95]",   inf_metrics["map"],       0)
+    tb_logger.log_scalar("test/mAP@0.50",       inf_metrics["map_50"],    0)
+    tb_logger.log_scalar("test/mAP@0.75",       inf_metrics["map_75"],    0)
+    tb_logger.log_scalar("test/precision",      inf_metrics["precision"], 0)
+    tb_logger.log_scalar("test/recall",         inf_metrics["recall"],    0)
+
+    for cls_name, ap_val in inf_metrics.get("ap_per_class", {}).items():
+        tb_logger.log_scalar(f"test/ap_{cls_name}", ap_val, 0)
+
+    tb_logger.close()
+    print("[TensorBoard] Test results logged.")
+
+
+def _log_test_results_to_mlflow(mlf_logger, inf_losses, inf_metrics):
+    if mlf_logger is None:
+        return
+    metrics = {
+        "test_total_loss":    inf_losses["total_loss"],
+        "test_loss_cls":      inf_losses["loss_classifier"],
+        "test_loss_box_reg":  inf_losses["loss_box_reg"],
+        "test_loss_obj":      inf_losses["loss_objectness"],
+        "test_loss_rpn_box":  inf_losses["loss_rpn_box_reg"],
+        "test_mAP_5_95":      inf_metrics["map"],
+        "test_mAP_50":        inf_metrics["map_50"],
+        "test_mAP_75":        inf_metrics["map_75"],
+        "test_precision":     inf_metrics["precision"],
+        "test_recall":        inf_metrics["recall"],
+    }
+    for cls_name, ap_val in inf_metrics.get("ap_per_class", {}).items():
+        metrics[f"test_ap_{cls_name}"] = ap_val
+
+    mlf_logger.log_metrics(metrics, step=0)
+    mlf_logger.end_run()
+    print("[MLflow] Test results logged.")
 
 
 # ===========================================================================
@@ -631,4 +695,5 @@ if __name__ == "__main__":
         score_threshold=args.score_threshold,
         output_dir=args.output_dir,
         split = args.split or "test", #if args.split not given, default to 'test', else use provided split (either 'val' or 'test')
+        
     )

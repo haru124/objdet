@@ -4,7 +4,6 @@ main.py — Unified entry point. Thin dispatcher only.
 Modes:
   train     → full training loop (default)
   inference → test-set evaluation, visualization, plots
-  debug     → tensor shape inspection, no data needed
   export    → ONNX export from checkpoint
 
 Usage examples:
@@ -21,8 +20,6 @@ Usage examples:
       --n-samples 8 \
       --score-threshold 0.4
 
-  # Debug tensor shapes (no GPU, no data needed)
-  python main.py --mode debug
 
   # Export to ONNX
   python main.py --mode export \
@@ -55,12 +52,11 @@ def parse_args():
     # ── Mode ────────────────────────────────────────────────────────────────
     parser.add_argument(
         "--mode",
-        choices=["train", "inference", "debug", "export"],
+        choices=["train", "inference", "export"],
         default="train",
         help=(
             "train     : run training loop\n"
             "inference : evaluate on test set + visualize + plot\n"
-            "debug     : print tensor shapes at each stage (no data needed)\n"
             "export    : export checkpoint to ONNX\n"
         ),
     )
@@ -164,10 +160,8 @@ def main():
     _print_header(cfg, args)
 
     # ── Route to the right pipeline ─────────────────────────────────────────
-    if args.mode == "debug":
-        _run_debug(cfg)
 
-    elif args.mode == "train":
+    if args.mode == "train":
         best_ckpt = _run_train(args, cfg)
 
         # Optionally chain inference after training
@@ -191,15 +185,6 @@ def main():
 # PIPELINE RUNNERS
 # Each is a thin wrapper — all real logic lives in its own module.
 # ===========================================================================
-
-def _run_debug(cfg):
-    """Print tensor shapes at each stage. No data or GPU required."""
-    from objdet.models.detector import debug_detector
-    debug_detector(
-        image_height=cfg.debug.image_height,
-        image_width=cfg.debug.image_width,
-        batch_size=cfg.debug.batch_size,
-    )
 
 
 def _run_train(args, cfg) -> Path:

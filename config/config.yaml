@@ -15,9 +15,9 @@ model:
   num_classes: 9                     # 8 Cityscapes classes + background
   #pretrained_backbone: true
   #pretrained_weights_path: str = "weights/fasterrcnn_resnet50_fpn_coco-258fb6c6.pth"
-  backbone_weights: "local"
+  backbone_weights: "local" #load downloaded pretrained weights from local path instead of torchvision's model zoo
   local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
-  load_backbone_only: false              # If true, only load weights for backbone layers, ignore mismatched layers like RPN and RoI heads
+  load_backbone_only: false              # If true, only load weights for resnet, not for fpn. as in imagenet pretrained weights - similar to 'imagenet' 
   trainable_backbone_layers: 3       # How many ResNet layers to fine-tune (0-5) 0 - freeze all, 1 - fine-tune last layer, 2 - fine-tune last 2 layers 5 - fine-tune all
   #layer in resnest have 3 to 6 bottleneck blocks - each block has 3 conv layers, so 3 layers in resnet have (3 or 6)*3=9 to 18 conv layers
   min_size: 800                     # Shortest side of the image after resizing, retains aspect ratio

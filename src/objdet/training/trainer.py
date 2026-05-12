@@ -159,6 +159,28 @@ class Trainer:
         print(f"[Trainer] Checkpoints  : {self.ckpt_dir}")
         print(f"[Trainer] History file : {self.history_path}")
 
+        
+        if self.tb_logger:
+            # Log all hyperparameters to TensorBoard HParams tab
+            hparam_dict = {
+                "lr":               cfg.training.learning_rate,
+                "optimizer":        cfg.training.optimizer,
+                "batch_size":       cfg.training.batch_size,
+                "epochs":           cfg.training.epochs,
+                "backbone":         cfg.model.backbone_weights,
+                "trainable_layers": cfg.model.trainable_backbone_layers,
+                "loss_cls":         cfg.loss.classification,
+                "loss_box":         cfg.loss.box_regression,
+                "lr_scheduler":     cfg.training.lr_scheduler,
+                "weight_decay":     cfg.training.weight_decay,
+            }
+            # Metric dict required by TensorBoard HParams — placeholders, updated later
+            metric_dict = {
+                "epoch/val_mAP[.5:.95]": 0.0,
+                "epoch/val_mAP@0.50":    0.0,
+            }
+            self.tb_logger.log_hparams(hparam_dict, metric_dict)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -254,7 +276,7 @@ class Trainer:
             # ── TensorBoard ────────────────────────────────────────────
             if self.tb_logger:
                 self.tb_logger.log_scalar(
-                    "epoch/train_total_loss", train_losses["total_loss"], epoch
+                    "epoch/total_training_loss", train_losses["total_loss"], epoch
                 )
                 for k in self.LOSS_KEYS:
                     self.tb_logger.log_scalar(
@@ -269,11 +291,24 @@ class Trainer:
                         self.tb_logger.log_scalar(
                             f"epoch/val_{k}", val_losses.get(k, 0.0), epoch
                         )
-                    for metric_name, v in val_metrics.items():
-                        if isinstance(v, float):
-                            self.tb_logger.log_scalar(
-                                f"epoch/val_{metric_name}", v, epoch
-                            )
+                    _metric_display_names = {
+                        "map":       "epoch/val_mAP[.5:.95]",
+                        "map_50":    "epoch/val_mAP@0.50",
+                        "map_75":    "epoch/val_mAP@0.75",
+                        "precision": "epoch/val_precision",
+                        "recall":    "epoch/val_recall",
+                    }
+                    for key, tag in _metric_display_names.items():
+                        if key in val_metrics:
+                            self.tb_logger.log_scalar(tag, val_metrics[key], epoch)
+
+                    # Per-class AP — logged as separate scalars under "per_class_ap/" group
+                    ap_per_class = val_metrics.get("ap_per_class", {})
+                    for cls_name, ap_val in ap_per_class.items():
+                        self.tb_logger.log_scalar(
+                            f"per_class_ap/{cls_name}", ap_val, epoch
+                        )
+
 
             # ── MLflow ─────────────────────────────────────────────────
             if self.mlf_logger:
@@ -288,9 +323,20 @@ class Trainer:
                     metrics_to_log.update(
                         {f"val_{k}": val_losses.get(k, 0.0) for k in self.LOSS_KEYS}
                     )
-                    metrics_to_log.update(
-                        {k: v for k, v in val_metrics.items() if isinstance(v, float)}
-                    )
+                _mlflow_metric_names = {
+                    "map":       "val_mAP_5_95",    # mlflow keys cannot have special chars
+                    "map_50":    "val_mAP_5",
+                    "map_75":    "val_mAP_75",
+                    "precision": "val_precision",
+                    "recall":    "val_recall",
+                }
+                for key, mlkey in _mlflow_metric_names.items():
+                    if key in val_metrics:
+                        metrics_to_log[mlkey] = val_metrics[key]
+
+                for cls_name, ap_val in val_metrics.get("ap_per_class", {}).items():
+                    metrics_to_log[f"ap_{cls_name}"] = ap_val
+                
                 self.mlf_logger.log_metrics(metrics_to_log, step=epoch)
 
             # ── Persist history ────────────────────────────────────────
@@ -385,7 +431,7 @@ class Trainer:
                 )
                 if self.tb_logger:
                     self.tb_logger.log_scalar(
-                        "batch/total_loss", total_loss.item(), self.global_step
+                        "batch/total_training_loss", total_loss.item(), self.global_step
                     )
                     for k in self.LOSS_KEYS:
                         self.tb_logger.log_scalar(

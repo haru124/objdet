@@ -4,25 +4,22 @@
 experiment_name: exp_02_focal_giou
 
 training:
-  epochs: 20
-  batch_size: 2
-  optimizer: "adamw"
+  epochs: 10
+  batch_size: 4
+  optimizer: "adamw" # AdamW is often better for transformer-based models, but can also help CNNs with better generalization and less sensitivity to learning rate
+  #adamw learning rate should typically be lower than sgd, so we reduce it from 0.002 to 0.0001- why lower? AdamW adapts learning rates for each parameter, so it can often achieve good results with a lower base learning rate compared to SGD, which uses a fixed learning rate for all parameters. AdamW's adaptive nature allows it to converge faster and more effectively, especially in scenarios with sparse gradients or noisy data, which is common in object detection tasks. Additionally, using a lower learning rate with AdamW can help prevent overshooting minima and improve overall training stability.
   learning_rate: 0.0001
   weight_decay: 0.01
-  lr_scheduler: "cosine"
+  lr_scheduler: "cosine" # cosine annealing for smoother decay
   momentum: 0.0              # not used by AdamW, but set explicitly for clarity
 
 model:
   backbone_weights: "local"
-  local_weights_path: "weights/fasterrcnn_resnet50_fpn_v2_coco.pth"
-  trainable_backbone_layers: 3
+  local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
+  trainable_backbone_layers: 1
 
 loss:
   classification: "focal"
   focal_alpha: 0.25
   focal_gamma: 2.0
   box_regression: "giou"
-
-eval:
-  iou_thresholds: [0.5, 0.75]
-  score_threshold: 0.05
