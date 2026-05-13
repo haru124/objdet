@@ -1,0 +1,230 @@
+Slide 1 — Title
+
+"So this section is about object detection on the Cityscapes dataset. We've already seen the EDA — 19 classes for segmentation, 8 for detection. Now I'll walk you through the model we chose, why we chose it, how it works internally, and the three experiments we ran to compare different training configurations."
+
+
+Slide 2 — CNN Model Taxonomy
+
+"Before jumping to our model, I want to give context on the landscape of purely convolutional object detectors — no transformers, no ViT.
+
+
+There are two fundamental paradigms. On the left you have two-pass models — these first generate region proposals, then classify each one. On the right, one-pass models — a single forward pass directly predicts boxes and classes at every location.
+
+
+The two-pass family evolved from R-CNN, which was painfully slow because it ran a CNN on every single crop. Fast R-CNN fixed that by sharing the convolutional feature map. Then Faster R-CNN made the whole thing end-to-end by replacing the CPU-based selective search with a learnable Region Proposal Network.
+
+
+On the one-pass side, SSD and YOLO prioritize speed. RetinaNet is interesting — it's single-stage but introduced Focal Loss to handle class imbalance. FCOS goes anchor-free.
+
+
+The yellow bars mark the models with ResNet backbones — which is our backbone too. The highlighted one, Faster R-CNN, is what we used, and I'll explain exactly why."
+
+
+Slide 3 — Why Faster R-CNN
+
+"So why Faster R-CNN specifically?
+
+
+In general terms — it's end-to-end trainable, it's been the accuracy benchmark for two-stage detectors for years, and the FPN backbone gives us rich multi-scale features. It's also well-integrated into torchvision, which matters practically.
+
+
+But more importantly — why is it the right choice for Cityscapes specifically?
+
+
+Cityscapes images are 2048×1024 — very high resolution. Objects range from large buses right in front to pedestrians 50 meters away that are maybe 20 pixels tall. For those tiny, occluded objects, the two-stage refinement is crucial. The RPN first generates class-agnostic proposals, and then the detection head refines them precisely. A single-stage model makes one shot at that — two stages give you a second chance to get it right.
+
+
+Also, Cityscapes has extreme class imbalance — pedestrians and cars dominate, trains are rare. The RPN handles this cleanly because it's class-agnostic — it just finds 'something is here', and the head handles what that something is.
+
+
+Now, why not RetinaNet, which is the obvious alternative with the same backbone? RetinaNet is single-stage — its predictions are coarser. Focal Loss helps with imbalance, but you lose the two-stage accuracy advantage. On dense, overlapping scenes like Cityscapes, that matters. Empirically, Faster R-CNN consistently outperforms RetinaNet on Cityscapes mAP with the same backbone."
+
+
+Slide 4 — Architecture Diagram
+
+"Let me walk through the full pipeline.
+
+
+An image comes in — 2048×1024 for Cityscapes. It first goes through the ResNet-50 backbone with FPN. ResNet extracts feature maps at different depths, and FPN builds a pyramid — P2 through P5 — where each level has 256 channels but represents different scales. P2 captures fine-grained details for small objects, P5 captures semantic, coarse features for large objects.
+
+
+Those feature maps go into two branches simultaneously.
+
+
+The RPN looks at every location on every FPN level, generates anchors, and for each anchor predicts: is there an object here, and if so, how should I adjust this box? After NMS it outputs roughly 2000 candidate regions during training.
+
+
+Those proposals go to MultiScaleRoIAlign, which routes each proposal to the right FPN level based on proposal size — you can see the formula here — and pools it into a fixed 7×7 feature.
+
+
+Then the TwoMLPHead flattens that and passes it through two fully connected layers to get a 1024-dim representation.
+
+
+Finally, FastRCNNPredictor runs two parallel heads — one predicts the class score across our 8 classes plus background, the other predicts the bounding box refinement.
+
+
+On the left you can see the FPN level assignment formula — smaller objects go to lower-level, higher-resolution feature maps."
+
+
+Slide 5 — Torchvision Internals (Transform, AnchorGenerator, RPN)
+
+"Now let's go one level deeper — what's actually happening inside torchvision.
+
+
+GeneralizedRCNNTransform is the first thing that runs. It normalizes pixel values using ImageNet mean and std, resizes the shorter edge to 800 pixels capped at 1333, and batches the images. Importantly, it also handles the inverse transform at inference — so when we get predicted boxes back, it maps them to original image coordinates.
+
+
+AnchorGenerator places anchors at every spatial location on every FPN level. We have 5 levels, each with 3 aspect ratios — 0.5, 1.0, 2.0. For a single FPN level like P3 at 200×100, that's already 60,000 anchors. Total across all levels for a typical Cityscapes image — roughly 250,000 to 300,000 anchors.
+
+
+RPNHead is a lightweight convolutional head shared across all FPN levels. It outputs two things: objectness scores — is there an object at this anchor? — and box deltas — how to adjust the anchor to fit the object. After NMS, we get the top proposals.
+
+
+RegionProposalNetwork is the orchestrator — it puts all of this together, samples anchors for training, computes the RPN losses, and returns filtered proposals to the detection head."
+
+
+Slide 6 — Torchvision Internals (RoIAlign, TwoMLPHead, Predictor)
+
+"Continuing into the detection head.
+
+
+MultiScaleRoIAlign takes each proposal and figures out which FPN level to extract features from — larger proposals go to coarser levels, smaller ones to finer levels. Then it does bilinear-interpolated RoI Align to pool each proposal into a 7×7 grid. The key advantage over the older RoI Pooling is that there's no quantization — no rounding of coordinates — so you get more precise features, especially important for small objects.
+
+
+Output shape: number-of-proposals × 256 channels × 7 × 7. With 1000 proposals and batch size 4, that's 4000 RoI feature tensors per forward pass.
+
+
+TwoMLPHead flattens each 7×7 RoI — that's 256×7×7 = 12,544 values — and passes it through two FC layers with ReLU, down to a 1024-dimensional vector. This is the shared representation.
+
+
+FastRCNNPredictor splits that into two heads. The classification head outputs logits for 9 classes — 8 Cityscapes classes plus background. The regression head outputs 4 box deltas per class. At inference, we take softmax, decode the deltas, run per-class NMS, and filter by score threshold."
+
+
+Slide 7 — Training Setup
+
+"For training setup — we downloaded the full pretrained Faster R-CNN ResNet-50 FPN model trained on COCO. This is the complete model — backbone, RPN, heads, all of it — not just the backbone weights.
+
+
+Why COCO pretraining? Because COCO and Cityscapes share a lot of semantics — persons, cars, bicycles, trucks, buses. The model already knows what these look like. We're fine-tuning, not training from scratch.
+
+
+We set trainable_backbone_layers=1, which means we freeze everything except the last ResNet block and the FPN top layer. This is a hardware constraint — GPU VRAM — but it's also reasonable because the pretrained features are already strong.
+
+
+The config table shows the standard defaults — anchor sizes covering 32 to 512 pixels, RoI output 7×7, NMS threshold 0.5, score threshold 0.05. mAP is evaluated across IoU thresholds from 0.5 to 0.95, which is the COCO-style evaluation.
+
+
+Batch size is 4 across all experiments, consistent hardware budget."
+
+
+Slide 8 — Experiment 01 Config
+
+"Now the experiments. Experiment 01 is our baseline — the goal is to establish a performance floor with the most standard setup possible.
+
+
+We use SGD with momentum 0.9 and learning rate 0.002. SGD is the canonical optimizer for the R-CNN family — well-studied, stable. The learning rate is conservative because we don't want to disrupt the COCO-pretrained weights.
+
+
+StepLR drops the learning rate by 10× at epoch 7. This is the standard schedule for Faster R-CNN fine-tuning.
+
+
+Loss functions are vanilla — Cross Entropy for classification, Smooth L1 for box regression. Both are the defaults in torchvision's implementation.
+
+
+10 epochs with batch size 4. The key point of this experiment is isolation — nothing fancy, so whatever mAP we get here is purely about the model's capacity and the pretrained weights. Experiments 2 and 3 change one thing at a time relative to this."
+
+
+Slides 9–11 — Experiment 01 Results
+
+"(Slide 9 — Losses)
+Here you can see the training loss curves. (Point to total loss) The total loss is the sum of four components internally — RPN classification, RPN regression, detection classification, and detection regression. (Walk through what you observe — is it converging smoothly? Did it drop after the StepLR kick at epoch 7?)
+
+
+(Slide 10 — mAP)
+The mAP@0.5 is our primary metric. (Give the number.) mAP@0.5:0.95 is the stricter COCO-style metric. Per class — (highlight notable ones) — Car and Person tend to be the strongest because they dominate the training data. Train and Motorcycle are typically hardest due to class imbalance and appearance variability.
+
+
+(Slide 11 — Qualitative)
+These are actual detections on the test split. (Walk through images.) You can see the model handles (mention what it does well). The harder case here shows (failure mode — occluded pedestrians, far-away objects, etc.)."
+
+
+Slide 12 — Experiment 02 Config
+
+"Experiment 02 keeps everything else identical to Exp 01 — same optimizer, same LR, same schedule — and changes only the loss functions.
+
+
+We switch from Cross Entropy to Focal Loss with α=0.25 and γ=2.0. These are the values from the original RetinaNet paper, well-validated for class imbalance. Focal Loss down-weights easy negatives — all that background — and focuses the gradient on hard examples. In Cityscapes, background vastly outnumbers objects, so this is a real concern.
+
+
+For box regression we switch from Smooth L1 to GIoU loss. The key advantage of GIoU over Smooth L1 is that it's defined even when boxes don't overlap at all — it gives a gradient signal from the very start of training when the predicted box might be nowhere near the ground truth. Smooth L1 on raw coordinate deltas doesn't have that property.
+
+
+The hypothesis: Focal Loss should help on rare classes — Train, Motorcycle, Rider — and GIoU should tighten the bounding boxes overall. The direct comparison to Exp 01 tells us exactly how much the loss function matters."
+
+
+Slides 13–15 — Experiment 02 Results
+
+"(Slide 13 — Losses)
+One thing to note when comparing losses across experiments — Focal and GIoU loss have different numerical scales than CE and Smooth L1, so don't read too much into the absolute values. What matters is the trend and the final mAP.
+
+
+(Slide 14 — mAP)
+(Compare to Exp 01.) The key question here is: did Focal Loss actually help on the rare classes? (Point to Train, Motorcycle, Rider AP.) If those went up, the hypothesis holds. If overall mAP dropped, the GIoU loss may need more epochs to converge — it's slower than Smooth L1 early in training.
+
+
+(Slide 15 — Qualitative)
+(If you have side-by-sides with Exp 01) Here's the same scene from both experiments. You can see (any visible differences in box tightness or recall on small objects)."
+
+
+Slide 16 — Experiment 03 Config
+
+"Experiment 03 goes back to Cross Entropy and Smooth L1 — the same losses as Exp 01 — but switches the optimizer to AdamW with a much lower learning rate of 0.0001.
+
+
+Why AdamW? SGD with momentum is great for training from scratch, but for fine-tuning pretrained weights, adaptive optimizers sometimes converge faster because they adapt the learning rate per parameter. Parameters that don't need much updating stay stable, parameters that do get larger gradients get pushed more.
+
+
+The lower LR — 0.0001 vs 0.002 — is necessary because AdamW's adaptive scaling already amplifies effective step sizes. Using 0.002 with AdamW would be aggressive.
+
+
+AdamW specifically — versus plain Adam — adds proper weight decay decoupled from the gradient update. This is important for fine-tuning: we want regularization on the weights without it interfering with the adaptive gradient scaling.
+
+
+The comparison this gives us: Exp 01 vs Exp 03 isolates optimizer choice with everything else equal. Exp 02 vs Exp 01 isolates loss function choice. Together, all three tell a clean story."
+
+
+Slides 17–19 — Experiment 03 Results
+
+"(Slide 17 — Loss & convergence)
+The interesting question for AdamW is convergence speed. (Point to early epochs.) Did it get to a lower loss faster than SGD? AdamW often converges quicker in the early epochs but can plateau earlier. (Describe what you see.)
+
+
+(Slide 18 — mAP)
+(Compare all three.)
+
+
+(Slide 19 — Summary table)
+This table is the key takeaway. We have three clearly isolated experiments — baseline SGD, then loss-function change, then optimizer change. (Read off the mAP values.) Based on this, the best performing configuration is (Exp X) and we'd recommend that as the setup to push further — either increasing trainable layers, adding augmentation, or running more epochs if hardware allows."
+
+
+Slide 20 — Summary
+
+"To wrap up the object detection section.
+
+
+We chose Faster R-CNN because Cityscapes specifically benefits from two-stage refinement — high resolution, small objects, heavy occlusion. Single-stage models make one shot; we wanted two.
+
+
+We started from strong COCO pretrained weights, which already encode urban object features, and fine-tuned only the last layer due to hardware constraints.
+
+
+Three experiments gave us a controlled comparison: Exp 01 is the baseline, Exp 02 tests whether better loss functions help, Exp 03 tests whether AdamW converges better than SGD.
+
+
+The results show (your finding — whichever experiment won).
+
+
+If we were to extend this work, the natural next steps are: increasing trainable layers to 2 or 3 if VRAM allows, adding data augmentation like horizontal flip and scale jitter which should give a few mAP points for free, and potentially looking at Cascade R-CNN which adds a third stage of refinement for dense scenes like this.
+
+
+Happy to take questions."
