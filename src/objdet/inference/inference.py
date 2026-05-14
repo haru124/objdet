@@ -61,7 +61,9 @@ def run_inference(
     output_dir: str = PROJECT_ROOT / "outputs" / "inference",
     split: str = "test",
     tb_log_dir: str | None = None,
-    mlflow_uri: str | None = None):
+    mlflow_uri: str | None = None,
+    sample_seed: int = 0,
+):
     """
     Full inference pipeline. Call from script or import directly.
     """
@@ -153,6 +155,7 @@ def run_inference(
         n_samples=n_samples,
         score_threshold=score_threshold,
         viz_dir=viz_dir,
+        seed=sample_seed,
     )
 
     # ── 7. Load training history ───────────────────────────────────────────
@@ -298,70 +301,76 @@ def _visualize_samples(
     n_samples: int,
     score_threshold: float,
     viz_dir: Path,
+    seed: int = 0,
 ):
     """
     Collect n_samples from data_loader, run inference, and save
     side-by-side GT vs Prediction plots with printed coordinates.
     """
     model.eval()
-    collected = 0
 
-    for batch_idx, (images, targets) in enumerate(data_loader):
-        if collected >= n_samples:
-            break
+    if not hasattr(data_loader, "dataset") or not hasattr(data_loader.dataset, "__getitem__"):
+        raise ValueError(
+            "data_loader.dataset must support indexing for deterministic sample selection"
+        )
 
-        images_dev = [img.to(device) for img in images]
+    dataset = data_loader.dataset
+    dataset_length = len(dataset)
+    if n_samples > dataset_length:
+        raise ValueError(
+            f"n_samples={n_samples} is larger than dataset length={dataset_length}"
+        )
+
+    indices = np.random.default_rng(seed).choice(dataset_length, size=n_samples, replace=False)
+
+    for sample_idx, idx in enumerate(indices, start=1):
+        image, target = dataset[idx]
+        images_dev = [image.to(device)]
 
         with torch.no_grad():
             predictions = model(images_dev)
+            pred = predictions[0]
 
-        for img_tensor, target, pred in zip(images, targets, predictions):
-            if collected >= n_samples:
-                break
+        img_id = target["image_id"].item()
+        print(f"\n{'='*65}")
+        print(f"  Sample {sample_idx} / {n_samples}   (image_id={img_id})")
+        print(f"{'='*65}")
 
-            img_id = target["image_id"].item()
-            sample_idx = collected + 1
+        gt_boxes  = target["boxes"].cpu()
+        gt_labels = target["labels"].cpu()
+        pred_boxes  = pred["boxes"].cpu()
+        pred_labels = pred["labels"].cpu()
+        pred_scores = pred["scores"].cpu()
 
-            print(f"\n{'='*65}")
-            print(f"  Sample {sample_idx} / {n_samples}   (image_id={img_id})")
-            print(f"{'='*65}")
+        # Filter predictions by score threshold
+        keep = pred_scores >= score_threshold
+        pred_boxes_filt  = pred_boxes[keep]
+        pred_labels_filt = pred_labels[keep]
+        pred_scores_filt = pred_scores[keep]
 
-            gt_boxes  = target["boxes"].cpu()
-            gt_labels = target["labels"].cpu()
-            pred_boxes  = pred["boxes"].cpu()
-            pred_labels = pred["labels"].cpu()
-            pred_scores = pred["scores"].cpu()
+        # Print coordinates
+        _print_boxes("GROUND TRUTH", gt_boxes, gt_labels, scores=None)
+        _print_boxes(
+            "PREDICTIONS (filtered)", pred_boxes_filt,
+            pred_labels_filt, pred_scores_filt
+        )
 
-            # Filter predictions by score threshold
-            keep = pred_scores >= score_threshold
-            pred_boxes_filt  = pred_boxes[keep]
-            pred_labels_filt = pred_labels[keep]
-            pred_scores_filt = pred_scores[keep]
-
-            # Print coordinates
-            _print_boxes("GROUND TRUTH", gt_boxes, gt_labels, scores=None)
-            _print_boxes(
-                "PREDICTIONS (filtered)", pred_boxes_filt,
-                pred_labels_filt, pred_scores_filt
-            )
-
-            # Save side-by-side figure
-            save_path = viz_dir / f"sample_{sample_idx:03d}_imgid_{img_id}.png"
-            draw_predictions_vs_gt(
-                image=img_tensor,
-                gt_boxes=gt_boxes,
-                gt_labels=gt_labels,
-                pred_boxes=pred_boxes_filt,
-                pred_labels=pred_labels_filt,
-                pred_scores=pred_scores_filt,
-                score_threshold=0.0,    # already filtered above
-                title=f"Sample {sample_idx} | image_id={img_id}",
-                save_path=save_path,
-                show=False,
-                print_coords=False,     # already printed above
-            )
-            print(f"  [Viz] Saved → {save_path}")
-            collected += 1
+        # Save side-by-side figure
+        save_path = viz_dir / f"sample_{sample_idx:03d}_imgid_{img_id}.png"
+        draw_predictions_vs_gt(
+            image=image,
+            gt_boxes=gt_boxes,
+            gt_labels=gt_labels,
+            pred_boxes=pred_boxes_filt,
+            pred_labels=pred_labels_filt,
+            pred_scores=pred_scores_filt,
+            score_threshold=0.0,    # already filtered above
+            title=f"Sample {sample_idx} | image_id={img_id}",
+            save_path=save_path,
+            show=False,
+            print_coords=False,
+        )
+        print(f"  [Viz] Saved → {save_path}")
 
 
 def _print_boxes(title: str, boxes, labels, scores=None):
@@ -679,6 +688,8 @@ def _parse_args():
     p.add_argument("--ckpt",             required=True, help="Path to .pth checkpoint")
     p.add_argument("--n-samples",        type=int,   default=5)
     p.add_argument("--score-threshold",  type=float, default=0.5)
+    p.add_argument("--sample-seed",      type=int,   default=0,
+                   help="Fixed seed to deterministically choose visualization samples")
     p.add_argument("--output-dir",       default="outputs/inference")
     p.add_argument("--split",            default="test", choices=["val", "test"],
                    help="Which data split to evaluate on (default: test). ")
@@ -694,6 +705,7 @@ if __name__ == "__main__":
         n_samples=args.n_samples,
         score_threshold=args.score_threshold,
         output_dir=args.output_dir,
-        split = args.split or "test", #if args.split not given, default to 'test', else use provided split (either 'val' or 'test')
+        split=args.split or "test",
+        sample_seed=args.sample_seed,
         
     )
