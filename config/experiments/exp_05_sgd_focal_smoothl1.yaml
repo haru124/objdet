@@ -1,7 +1,7 @@
 # =============================================================================
-# Experiment 02 — SGD + Focal loss + GIoU box regression
+# Experiment 05 — SGD + Focal loss + Smooth L1 box regression
 # =============================================================================
-experiment_name: exp_02_sgd_focal_giou
+experiment_name: exp_05_sgd_focal_smoothl1
 
 training:
   epochs: 10
@@ -19,7 +19,7 @@ loss:
   classification: "focal_loss"     # switch to focal loss for classification to handle class imbalance better
   focal_alpha: 0.25
   focal_gamma: 2.0
-  box_regression: "giou"
+  box_regression: "smooth_l1"
 
 
 checkpointing:

@@ -1,26 +1,27 @@
 # =============================================================================
-# Experiment 02 — SGD + Focal loss + GIoU box regression
+# Experiment 03 — AdamW with Cross Entropy and Smooth L1
+# Overrides only what differs from config.yaml
 # =============================================================================
-experiment_name: exp_02_sgd_focal_giou
+experiment_name: exp_04_adamw_focal_giou
 
 training:
   epochs: 10
   batch_size: 4
-  optimizer: "sgd" # SGD is a simple and robust optimization algorithm that works well for many deep learning tasks
-  learning_rate: 0.002
- 
+  optimizer: "adamw"
+  learning_rate: 0.0001
+  momentum: 0.0              # not used by AdamW, but set explicitly for clarity
+
 model:
   backbone_weights: "local"
   local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
-  load_backbone_only: false   # Load only the ResNet50 body weights, not the RPN or ROI heads, for faster iteration during early experimentation
-  trainable_backbone_layers: 1
+  load_backbone_only: false   # true = Load only the ResNet50 body weights, not the RPN or ROI heads, for faster iteration during early experimentation
+  trainable_backbone_layers: 1    # freeze more layers for faster iteration
 
 loss:
   classification: "focal_loss"     # switch to focal loss for classification to handle class imbalance better
   focal_alpha: 0.25
   focal_gamma: 2.0
   box_regression: "giou"
-
 
 checkpointing:
   save_dir: outputs/checkpoints/  
