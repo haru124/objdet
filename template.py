@@ -18,7 +18,11 @@ list_of_files = [
 
     # config
     "config/config.yaml",
-    "config/experiments/exp_01.yaml",
+    "config/experiments/exp1.yaml",
+    "config/experiments/exp2.yaml",
+    "config/experiments/exp3.yaml",
+    "config/experiments/exp4.yaml",
+    
 
     # src structure
     f"src/{project_name}/constants/__init__.py",
@@ -28,10 +32,11 @@ list_of_files = [
     f"src/{project_name}/config/configuration.py",
 
     f"src/{project_name}/datasets/cityscapes_dataset.py",
+    f"src/{project_name}/datasets/dataloader.py",
     f"src/{project_name}/datasets/transforms.py",
 
     f"src/{project_name}/models/backbone.py",
-    f"src/{project_name}/models/neck.py",
+    #f"src/{project_name}/models/neck.py",
     f"src/{project_name}/models/detector.py",
 
     f"src/{project_name}/losses/losses.py",
@@ -39,6 +44,8 @@ list_of_files = [
     f"src/{project_name}/evaluation/metrics.py",
 
     f"src/{project_name}/training/trainer.py",
+
+    f"src/{project_name}/inference/inference.py",
 
     f"src/{project_name}/tracking/mlflow_logger.py",
     f"src/{project_name}/tracking/tensorboard_logger.py",
@@ -66,6 +73,7 @@ folders = [
     "config/experiments",
 
     "outputs/checkpoints",
+    "outputs/inference",
     "outputs/logs",
     "outputs/tensorboard",
     "outputs/mlruns",
