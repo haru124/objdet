@@ -53,8 +53,14 @@ training:
   #------gradient clipping------
   grad_clip: null                    # Optional gradient clipping value, when grad norm exceeds this value, it is scaled down to prevent exploding gradients, all gradients will be scaled down by the same factor(grad norm/clip_value) to maintain their relative magnitudes
   
-  device: cuda                       # "cuda" or "cpu"
-
+  device: cuda  
+                       # "cuda" or "cpu"
+  # AMP (Automatic Mixed Precision) — set true to enable fp16 training
+  # Requires CUDA. Speeds up training ~1.5-2x, halves GPU memory for activations.
+  amp: false
+  # Gradient accumulation — simulate larger batch size without more GPU memory
+  # effective_batch = batch_size * accumulation_steps
+  accumulation_steps: 1
 
 #-----loss
 # faster rcnn has 4 internal losses- rpn classification loss, rpn regression loss, roi head classification loss, roi head regression loss
@@ -85,6 +91,7 @@ eval:
 checkpointing:
   save_dir: outputs/checkpoints/  
   save_every: 2                      # Save checkpoint every N epochs
+  validate_every: 1                   # Run evaluation on validation set every N epochs (should be >= save_every to have metrics in checkpoint names)
   keep_last: 3                       # How many checkpoints to retain
 
 #--- logging ----------

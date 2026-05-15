@@ -1,18 +1,31 @@
 """
 training/trainer.py
 
-supports:
-  - Configurable optimizer: SGD | Adam | AdamW
-  - Configurable LR scheduler: StepLR | CosineAnnealingLR | none
-  - Configurable losses via losses.py patching
-  - Experiment-isolated checkpoint paths
-  - Improved checkpoint naming with epoch + loss
+Metric naming (internal keys, consistent everywhere):
+  map_50_95  →  mAP@[0.5:0.95]   primary COCO metric
+  map_50     →  mAP@0.50
+  map_75     →  mAP@0.75
 
-Tracks and saves:
-  - Per-batch: total loss + 4 component losses
-  - Per-epoch: mean of all 5 loss values (train)
-  - Per-eval-epoch: validation loss + validation mAP
-  - History dict saved to checkpoint for inference plotting
+Best checkpoint selection:
+  Primary criterion  : highest val map_50_95
+  Tie-break criterion: lowest val loss (when map_50_95 equal to 4dp)
+
+Validation frequency (validate_every) and checkpoint frequency (save_every)
+are decoupled. You can validate every epoch but checkpoint every 5.
+
+Note on model.train() during validation loss computation:
+  torchvision Faster R-CNN only returns a loss dict in train mode.
+  We call model.train() solely to access the loss dict, not to affect
+  BatchNorm/Dropout statistics — torch.no_grad() prevents weight updates.
+  This is the standard workaround for torchvision detection models.
+
+TODO (future):
+  - AMP (Automatic Mixed Precision): add torch.autocast + GradScaler
+    when cfg.training.amp is True. Insertion point marked below.
+  - Gradient accumulation: batch effective size =
+    batch_size * accumulation_steps. Insertion point marked below.
+  - ReduceLROnPlateau: scheduler.step(metric) already supported
+    via _scheduler_step() helper below.
 """
 
 import time
@@ -27,23 +40,20 @@ from objdet.entity.config_entity import TrainingPipelineConfig
 from objdet.evaluation.metrics import COCOEvaluator
 from objdet.tracking.tensorboard_logger import TensorBoardLogger
 from objdet.tracking.mlflow_logger import MLflowLogger
-from objdet.utils.checkpoint import save_checkpoint, load_checkpoint, cleanup_old_checkpoints
+from objdet.utils.checkpoint import (
+    save_checkpoint, save_best_checkpoint,
+    load_checkpoint, cleanup_old_checkpoints,
+)
 
 
 def build_optimizer(model, training_cfg):
-    """
-    Build optimizer from config.
-    SGD   → standard Faster R-CNN default
-    Adam  → adaptive LR, lower lr ~1e-4
-    AdamW → Adam + decoupled weight decay (best for fine-tuning transformers/FPN)
-    """
     from torch.optim import SGD, Adam, AdamW
     params = [p for p in model.parameters() if p.requires_grad]
     name = training_cfg.optimizer.lower()
-
     if name == "sgd":
         opt = SGD(params, lr=training_cfg.learning_rate,
-                  momentum=training_cfg.momentum, weight_decay=training_cfg.weight_decay)
+                  momentum=training_cfg.momentum,
+                  weight_decay=training_cfg.weight_decay)
     elif name == "adam":
         opt = Adam(params, lr=training_cfg.learning_rate,
                    weight_decay=training_cfg.weight_decay)
@@ -52,61 +62,60 @@ def build_optimizer(model, training_cfg):
                     weight_decay=training_cfg.weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {name}")
-
-    print(f"[Optimizer] {name.upper()} | lr={training_cfg.learning_rate} | "
-          f"wd={training_cfg.weight_decay} | params={sum(p.numel() for p in params):,}")
+    print(
+        f"[Optimizer] {name.upper()} | lr={training_cfg.learning_rate} | "
+        f"wd={training_cfg.weight_decay} | "
+        f"params={sum(p.numel() for p in params):,}"
+    )
     return opt
 
 
 def build_scheduler(optimizer, training_cfg):
-    """Build LR scheduler from config."""
     from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, ConstantLR
     name = training_cfg.lr_scheduler.lower()
-
     if name == "step":
-        sched = StepLR(optimizer, step_size=training_cfg.lr_step_size,
-                       gamma=training_cfg.lr_gamma)
+        return StepLR(optimizer,
+                      step_size=training_cfg.lr_step_size,
+                      gamma=training_cfg.lr_gamma)
     elif name == "cosine":
-        sched = CosineAnnealingLR(optimizer, T_max=training_cfg.epochs,
-                                  eta_min=training_cfg.learning_rate * 0.01)
+        return CosineAnnealingLR(optimizer,
+                                 T_max=training_cfg.epochs,
+                                 eta_min=training_cfg.learning_rate * 0.01)
     elif name == "none":
-        sched = ConstantLR(optimizer, factor=1.0, total_iters=0)
+        return ConstantLR(optimizer, factor=1.0, total_iters=0)
     else:
         raise ValueError(f"Unknown scheduler: {name}")
-    return sched
 
 
 class Trainer:
     """
-    Training loop with full loss history tracking.
+    Training loop with full loss/metric history tracking.
 
-    History structure (self.history):
+    History structure:
     {
         "train": {
-            "epoch":              [1, 2, 3, ...],
-            "total_loss":         [0.85, 0.72, ...],
-            "loss_classifier":    [0.30, 0.25, ...],
-            "loss_box_reg":       [0.20, 0.18, ...],
-            "loss_objectness":    [0.25, 0.20, ...],
-            "loss_rpn_box_reg":   [0.10, 0.09, ...],
+            "epoch":           [1, 2, ...],
+            "total_loss":      [...],
+            "loss_classifier": [...],
+            "loss_box_reg":    [...],
+            "loss_objectness": [...],
+            "loss_rpn_box_reg":[...],
         },
         "val": {
-            "epoch":              [2, 4, 6, ...],    # eval every save_every epochs
-            "total_loss":         [0.90, 0.80, ...],
-            "loss_classifier":    [...],
-            "loss_box_reg":       [...],
-            "loss_objectness":    [...],
-            "loss_rpn_box_reg":   [...],
-            "map":                [0.32, 0.38, ...],
-            "map_50":             [0.55, 0.60, ...],
-            "map_75":             [0.28, 0.34, ...],
-            "ap_per_class":       [{...}, {...}, ...],  # per-epoch class APs
-            
+            "epoch":           [1, 2, ...],   # every validate_every epochs
+            "total_loss":      [...],
+            "loss_classifier": [...],
+            "loss_box_reg":    [...],
+            "loss_objectness": [...],
+            "loss_rpn_box_reg":[...],
+            "map_50_95":       [...],   # mAP@[0.5:0.95]
+            "map_50":          [...],   # mAP@0.50
+            "map_75":          [...],   # mAP@0.75
+            "ap_per_class":    [{...}, ...],
+            "precision":       [...],
+            "recall":          [...],
         }
     }
-    This dict is saved to:
-      outputs/checkpoints/{experiment_name}/training_history.json
-    so inference.py can load and plot without retraining.
     """
 
     LOSS_KEYS = [
@@ -115,6 +124,24 @@ class Trainer:
         "loss_objectness",
         "loss_rpn_box_reg",
     ]
+
+    # TensorBoard display tags — pretty names only for UI, not used internally
+    _TB_METRIC_TAGS = {
+        "map_50_95": "epoch/val_mAP[.5:.95]",
+        "map_50":    "epoch/val_mAP@0.50",
+        "map_75":    "epoch/val_mAP@0.75",
+        "precision": "epoch/val_precision",
+        "recall":    "epoch/val_recall",
+    }
+
+    # MLflow metric keys — no special chars allowed in MLflow keys
+    _MLF_METRIC_KEYS = {
+        "map_50_95": "val_mAP_50_95",
+        "map_50":    "val_mAP_50",
+        "map_75":    "val_mAP_75",
+        "precision": "val_precision",
+        "recall":    "val_recall",
+    }
 
     def __init__(
         self,
@@ -143,25 +170,33 @@ class Trainer:
         self.start_epoch = 0
         self.global_step = 0
 
-        # Experiment-isolated checkpoint dir: outputs/checkpoints/exp_01/
         self.ckpt_dir = Path(cfg.checkpointing.save_dir) / cfg.experiment_name
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # History dict — persisted to JSON after every epoch
+        # ── History — uses standardized internal metric keys ──────────
         self.history = {
             "train": {k: [] for k in ["epoch", "total_loss"] + self.LOSS_KEYS},
-            "val":   {k: [] for k in ["epoch", "total_loss"] + self.LOSS_KEYS +
-                      ["map", "map_50", "map_75", "ap_per_class","precision", "recall"]},
+            "val": {k: [] for k in (
+                ["epoch", "total_loss"] + self.LOSS_KEYS +
+                ["map_50_95", "map_50", "map_75",   # standardized keys
+                 "ap_per_class", "precision", "recall"]
+            )},
         }
         self.history_path = self.ckpt_dir / "training_history.json"
 
-        print(f"[Trainer] Device       : {self.device}")
-        print(f"[Trainer] Checkpoints  : {self.ckpt_dir}")
-        print(f"[Trainer] History file : {self.history_path}")
+        # Best checkpoint tracking
+        # Primary  : highest map_50_95
+        # Tie-break: lowest loss (when map_50_95 equal to 4dp)
+        self.best_map_50_95 = 0.0
+        self.best_loss_at_best_map = float("inf")
 
-        
+        print(f"[Trainer] Device        : {self.device}")
+        print(f"[Trainer] Checkpoints   : {self.ckpt_dir}")
+        print(f"[Trainer] History file  : {self.history_path}")
+        print(f"[Trainer] Validate every: {cfg.checkpointing.validate_every} epoch(s)")
+        print(f"[Trainer] Save every    : {cfg.checkpointing.save_every} epoch(s)")
+
         if self.tb_logger:
-            # Log all hyperparameters to TensorBoard HParams tab
             hparam_dict = {
                 "lr":               cfg.training.learning_rate,
                 "optimizer":        cfg.training.optimizer,
@@ -174,7 +209,6 @@ class Trainer:
                 "lr_scheduler":     cfg.training.lr_scheduler,
                 "weight_decay":     cfg.training.weight_decay,
             }
-            # Metric dict required by TensorBoard HParams — placeholders, updated later
             metric_dict = {
                 "epoch/val_mAP[.5:.95]": 0.0,
                 "epoch/val_mAP@0.50":    0.0,
@@ -186,16 +220,25 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def resume(self, checkpoint_path: str | Path):
-        """Load checkpoint and restore history if available."""
+        """Load checkpoint and restore history."""
         self.start_epoch = load_checkpoint(
             checkpoint_path, self.model, self.optimizer, self.scheduler
         )
         self.global_step = self.start_epoch * len(self.train_loader)
-        # Restore history so plots are continuous across resumed runs
+
         if self.history_path.exists():
             with open(self.history_path, "r") as f:
                 self.history = json.load(f)
-            print(f"[Trainer] Restored training history from {self.history_path}")
+            # Restore best map seen so far so we don't re-save inferior checkpoints
+            val_maps = self.history.get("val", {}).get("map_50_95", [])
+            val_losses = self.history.get("val", {}).get("total_loss", [])
+            if val_maps:
+                self.best_map_50_95 = max(val_maps)
+                # Find loss at that best epoch
+                best_idx = val_maps.index(self.best_map_50_95)
+                if best_idx < len(val_losses):
+                    self.best_loss_at_best_map = val_losses[best_idx]
+            print(f"[Trainer] Restored history. Best mAP@[.5:.95] so far: {self.best_map_50_95:.4f}")
         print(f"[Trainer] Resumed from epoch {self.start_epoch}")
 
     def fit(self):
@@ -207,7 +250,14 @@ class Trainer:
 
             # ── Train ─────────────────────────────────────────────────
             train_losses = self._train_one_epoch(epoch)
-            # train_losses = {"total_loss": float, "loss_classifier": float, ...}
+
+            # NaN guard — catches exploding gradients silently
+            if not torch.isfinite(torch.tensor(train_losses["total_loss"])):
+                print(
+                    f"[Trainer] WARNING: NaN/Inf loss at epoch {epoch+1}. "
+                    "Stopping training. Check learning rate and grad_clip."
+                )
+                break
 
             self.history["train"]["epoch"].append(epoch + 1)
             self.history["train"]["total_loss"].append(train_losses["total_loss"])
@@ -215,75 +265,71 @@ class Trainer:
                 self.history["train"][k].append(train_losses.get(k, 0.0))
 
             # ── Validate ───────────────────────────────────────────────
-            # Run validation every save_every epochs to save compute.
-            # Always validate on last epoch.
+            # validate_every and save_every are now independent.
+            # Always validate on the last epoch regardless.
             run_val = (
-                (epoch + 1) % self.cfg.checkpointing.save_every == 0
+                (epoch + 1) % self.cfg.checkpointing.validate_every == 0
                 or (epoch + 1) == self.cfg.training.epochs
             )
 
             if run_val:
                 val_losses, val_metrics = self._validate(epoch)
-                # val_losses = same structure as train_losses
-                # val_metrics = {"map": float, "map_50": float, "map_75": float,
-                #                "ap_per_class": {class_name: float, ...}}
+
+                # ── Normalize metric keys to internal standard ─────────
+                # COCOEvaluator may return "map" for mAP@[.5:.95].
+                # We rename here so the rest of the code is consistent.
+                val_metrics = _normalize_metric_keys(val_metrics)
 
                 self.history["val"]["epoch"].append(epoch + 1)
                 self.history["val"]["total_loss"].append(val_losses["total_loss"])
-              
                 for k in self.LOSS_KEYS:
                     self.history["val"][k].append(val_losses.get(k, 0.0))
-                self.history["val"]["map"].append(val_metrics.get("map", 0.0))
+                self.history["val"]["map_50_95"].append(val_metrics.get("map_50_95", 0.0))
                 self.history["val"]["map_50"].append(val_metrics.get("map_50", 0.0))
                 self.history["val"]["map_75"].append(val_metrics.get("map_75", 0.0))
-                self.history["val"]["ap_per_class"].append(
-                    val_metrics.get("ap_per_class", {})
-                )
+                self.history["val"]["ap_per_class"].append(val_metrics.get("ap_per_class", {}))
                 self.history["val"]["precision"].append(val_metrics.get("precision", 0.0))
                 self.history["val"]["recall"].append(val_metrics.get("recall", 0.0))
             else:
-                val_losses = {"total_loss": float("nan")}
-                val_metrics = {"map": float("nan")}
+                val_losses  = {"total_loss": float("nan")}
+                val_metrics = {"map_50_95": float("nan")}
 
-            # ── LR step ────────────────────────────────────────────────
-            self.scheduler.step()
+            # ── LR scheduler step ──────────────────────────────────────
+            self._scheduler_step(val_metrics.get("map_50_95") if run_val else None)
             lr = self.optimizer.param_groups[0]["lr"]
 
             # ── Console summary ────────────────────────────────────────
             print(
-                f"\n[Epoch {epoch+1}] "
-                f"lr = {lr:.6f} | "
-                f"total_train_loss={train_losses['total_loss']:.4f} | "
+                f"\n[Epoch {epoch+1}] lr={lr:.6f} | "
+                f"train_loss={train_losses['total_loss']:.4f} | "
                 f"cls={train_losses.get('loss_classifier', 0):.4f} | "
                 f"box={train_losses.get('loss_box_reg', 0):.4f} | "
                 f"obj={train_losses.get('loss_objectness', 0):.4f} | "
-                f"rpn_box={train_losses.get('loss_rpn_box_reg', 0):.4f}"
+                f"rpn={train_losses.get('loss_rpn_box_reg', 0):.4f}"
             )
             if run_val:
                 print(
-                    f"[Epoch {epoch+1}] "
-                    f"total_val_loss={val_losses['total_loss']:.4f} | "
-                    f"mAP={val_metrics.get('map', 0):.4f} | "
+                    f"[Epoch {epoch+1}] val_loss={val_losses['total_loss']:.4f} | "
+                    f"mAP@[.5:.95]={val_metrics.get('map_50_95', 0):.4f} | "
                     f"mAP@50={val_metrics.get('map_50', 0):.4f} | "
-                    f"mAP@75={val_metrics.get('map_75', 0):.4f} | "
-                    f"lr={lr:.6f}"
+                    f"mAP@75={val_metrics.get('map_75', 0):.4f}"
                 )
-                # Per-class AP
                 if "ap_per_class" in val_metrics:
-                    print("[Epoch {e}] Per-class AP:".format(e=epoch+1))
+                    print(f"[Epoch {epoch+1}] Per-class AP:")
                     for cls_name, ap in val_metrics["ap_per_class"].items():
                         print(f"  {cls_name:<15}: {ap:.4f}")
 
             # ── TensorBoard ────────────────────────────────────────────
             if self.tb_logger:
                 self.tb_logger.log_scalar(
-                    "epoch/total_training_loss", train_losses["total_loss"], epoch
+                    "epoch/train_total_loss", train_losses["total_loss"], epoch
                 )
                 for k in self.LOSS_KEYS:
                     self.tb_logger.log_scalar(
                         f"epoch/train_{k}", train_losses.get(k, 0.0), epoch
                     )
                 self.tb_logger.log_scalar("epoch/lr", lr, epoch)
+
                 if run_val:
                     self.tb_logger.log_scalar(
                         "epoch/val_total_loss", val_losses["total_loss"], epoch
@@ -292,29 +338,21 @@ class Trainer:
                         self.tb_logger.log_scalar(
                             f"epoch/val_{k}", val_losses.get(k, 0.0), epoch
                         )
-                    _metric_display_names = {
-                        "map":       "epoch/val_mAP[.5:.95]",
-                        "map_50":    "epoch/val_mAP@0.50",
-                        "map_75":    "epoch/val_mAP@0.75",
-                        "precision": "epoch/val_precision",
-                        "recall":    "epoch/val_recall",
-                    }
-                    for key, tag in _metric_display_names.items():
-                        if key in val_metrics:
-                            self.tb_logger.log_scalar(tag, val_metrics[key], epoch)
-
-                    # Per-class AP — logged as separate scalars under "per_class_ap/" group
-                    ap_per_class = val_metrics.get("ap_per_class", {})
-                    for cls_name, ap_val in ap_per_class.items():
+                    for internal_key, tb_tag in self._TB_METRIC_TAGS.items():
+                        if internal_key in val_metrics:
+                            self.tb_logger.log_scalar(
+                                tb_tag, val_metrics[internal_key], epoch
+                            )
+                    for cls_name, ap_val in val_metrics.get("ap_per_class", {}).items():
                         self.tb_logger.log_scalar(
                             f"per_class_ap/{cls_name}", ap_val, epoch
                         )
 
-
             # ── MLflow ─────────────────────────────────────────────────
             if self.mlf_logger:
                 metrics_to_log = {
-                    "train_total_loss": train_losses["total_loss"], "lr": lr
+                    "train_total_loss": train_losses["total_loss"],
+                    "lr": lr,
                 }
                 metrics_to_log.update(
                     {f"train_{k}": train_losses.get(k, 0.0) for k in self.LOSS_KEYS}
@@ -324,87 +362,117 @@ class Trainer:
                     metrics_to_log.update(
                         {f"val_{k}": val_losses.get(k, 0.0) for k in self.LOSS_KEYS}
                     )
-                    _mlflow_metric_names = {
-                        "map":       "val_mAP_5_95",    # mlflow keys cannot have special chars
-                        "map_50":    "val_mAP_50",
-                        "map_75":    "val_mAP_75",
-                        "precision": "val_precision",
-                        "recall":    "val_recall",
-                    }
-                    for key, mlkey in _mlflow_metric_names.items():
-                        if key in val_metrics:
-                            metrics_to_log[mlkey] = val_metrics[key]
-
+                    for internal_key, mlf_key in self._MLF_METRIC_KEYS.items():
+                        if internal_key in val_metrics:
+                            metrics_to_log[mlf_key] = val_metrics[internal_key]
                     for cls_name, ap_val in val_metrics.get("ap_per_class", {}).items():
                         metrics_to_log[f"ap_{cls_name}"] = ap_val
-                
+
                 self.mlf_logger.log_metrics(metrics_to_log, step=epoch)
 
             # ── Persist history ────────────────────────────────────────
-            # Save after every epoch so crashes don't lose history
             self._save_history()
 
             # ── Checkpoint ────────────────────────────────────────────
-            if (epoch + 1) % self.cfg.checkpointing.save_every == 0:
+            run_save = (
+                (epoch + 1) % self.cfg.checkpointing.save_every == 0
+                or (epoch + 1) == self.cfg.training.epochs
+            )
+            if run_save:
+                current_map = val_metrics.get("map_50_95", 0.0) if run_val else 0.0
+                current_loss = train_losses["total_loss"]
+
                 save_checkpoint(
                     model=self.model,
                     optimizer=self.optimizer,
                     scheduler=self.scheduler,
                     epoch=epoch + 1,
-                    loss=train_losses["total_loss"],
+                    loss=current_loss,
+                    map_50_95=current_map,
                     experiment_name=self.cfg.experiment_name,
                     save_dir=self.ckpt_dir,
-                    extra={"history": self.history},   # embed history in checkpoint too
+                    extra={"history": self.history},
                 )
                 cleanup_old_checkpoints(
                     self.ckpt_dir, keep=self.cfg.checkpointing.keep_last
                 )
 
+                # ── Best checkpoint: primary=mAP, tie-break=loss ───────
+                if run_val and not torch.isnan(torch.tensor(current_map)):
+                    is_better_map  = current_map > self.best_map_50_95
+                    is_equal_map   = abs(current_map - self.best_map_50_95) < 1e-4
+                    is_better_loss = current_loss < self.best_loss_at_best_map
+
+                    if is_better_map or (is_equal_map and is_better_loss):
+                        self.best_map_50_95        = current_map
+                        self.best_loss_at_best_map = current_loss
+                        save_best_checkpoint(
+                            model=self.model,
+                            optimizer=self.optimizer,
+                            scheduler=self.scheduler,
+                            epoch=epoch + 1,
+                            loss=current_loss,
+                            map_50_95=current_map,
+                            experiment_name=self.cfg.experiment_name,
+                            save_dir=self.ckpt_dir,
+                            extra={"history": self.history},
+                        )
+
         print("\n[Trainer] Training complete.")
+        print(
+            f"[Trainer] Best mAP@[.5:.95] = {self.best_map_50_95:.4f} "
+            f"(loss at best = {self.best_loss_at_best_map:.4f})"
+        )
         print(f"[Trainer] History saved to: {self.history_path}")
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _scheduler_step(self, metric: Optional[float] = None):
+        """
+        Step the LR scheduler.
+
+        Handles both epoch-based schedulers (StepLR, CosineAnnealingLR)
+        and metric-based schedulers (ReduceLROnPlateau).
+        ReduceLROnPlateau requires scheduler.step(metric).
+        """
+        from torch.optim.lr_scheduler import ReduceLROnPlateau
+        if isinstance(self.scheduler, ReduceLROnPlateau):
+            if metric is not None and not torch.isnan(torch.tensor(metric)):
+                self.scheduler.step(metric)
+            # else: skip step — no valid metric this epoch
+        else:
+            self.scheduler.step()
+
     def _train_one_epoch(self, epoch: int) -> dict:
-        """
-        One epoch of training.
-
-        Returns dict of mean losses over all batches:
-        {
-            "total_loss":       float,
-            "loss_classifier":  float,
-            "loss_box_reg":     float,
-            "loss_objectness":  float,
-            "loss_rpn_box_reg": float,
-        }
-        """
         self.model.train()
-
-        # Accumulators for each loss component
         accum = {k: 0.0 for k in ["total_loss"] + self.LOSS_KEYS}
         log_every = self.cfg.logging.log_every
         t0 = time.time()
 
-        for batch_idx, (images, targets) in enumerate(self.train_loader):
-            images = [img.to(self.device) for img in images]
-            targets = [
-                {k: v.to(self.device) for k, v in t.items()} for t in targets
-            ]
+        # TODO: AMP — wrap forward+backward with torch.autocast here
+        # if self.cfg.training.amp:
+        #     scaler = torch.cuda.amp.GradScaler()
 
-            # Faster R-CNN train mode returns:
-            # {
-            #   "loss_classifier":  Tensor  ← ROI classification loss
-            #   "loss_box_reg":     Tensor  ← ROI box regression loss
-            #   "loss_objectness":  Tensor  ← RPN objectness loss
-            #   "loss_rpn_box_reg": Tensor  ← RPN box regression loss
-            # }
-            loss_dict = self.model(images, targets)
+        for batch_idx, (images, targets) in enumerate(self.train_loader):
+            images  = [img.to(self.device) for img in images]
+            targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+
+            loss_dict  = self.model(images, targets)
             total_loss = sum(v for v in loss_dict.values())
+
+            # NaN guard per batch
+            if not torch.isfinite(total_loss):
+                print(
+                    f"[Trainer] WARNING: Non-finite loss at batch {batch_idx}. "
+                    f"Skipping update."
+                )
+                continue
 
             self.optimizer.zero_grad()
             total_loss.backward()
+            # TODO: AMP — scaler.scale(total_loss).backward(); scaler.step(); scaler.update()
 
             if self.cfg.training.grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(
@@ -412,11 +480,9 @@ class Trainer:
                 )
             self.optimizer.step()
 
-            # Accumulate all losses
             accum["total_loss"] += total_loss.item()
             for k in self.LOSS_KEYS:
                 accum[k] += loss_dict.get(k, torch.tensor(0.0)).item()
-
             self.global_step += 1
 
             if (batch_idx + 1) % log_every == 0:
@@ -427,12 +493,12 @@ class Trainer:
                     f"cls={loss_dict.get('loss_classifier', torch.tensor(0)).item():.4f} | "
                     f"box={loss_dict.get('loss_box_reg', torch.tensor(0)).item():.4f} | "
                     f"obj={loss_dict.get('loss_objectness', torch.tensor(0)).item():.4f} | "
-                    f"rpn_box={loss_dict.get('loss_rpn_box_reg', torch.tensor(0)).item():.4f} "
+                    f"rpn={loss_dict.get('loss_rpn_box_reg', torch.tensor(0)).item():.4f} "
                     f"[{elapsed:.1f}s]"
                 )
                 if self.tb_logger:
                     self.tb_logger.log_scalar(
-                        "batch/total_training_loss", total_loss.item(), self.global_step
+                        "batch/total_train_loss", total_loss.item(), self.global_step
                     )
                     for k in self.LOSS_KEYS:
                         self.tb_logger.log_scalar(
@@ -446,29 +512,22 @@ class Trainer:
 
     def _validate(self, epoch: int) -> tuple[dict, dict]:
         """
-        Compute validation loss AND validation mAP.
+        Compute validation loss and mAP.
 
-        Returns:
-            val_losses : same structure as _train_one_epoch return
-            val_metrics: {"map": float, "map_50": float, "map_75": float,
-                          "ap_per_class": {class_name: float}}
-
-        How validation loss is computed:
-          We temporarily switch model to TRAIN mode (so it computes loss dict),
-          run forward with no_grad, then switch back to eval for mAP computation.
-          This gives a true "how well does the model fit the val data" signal.
+        NOTE on model.train() usage:
+          torchvision Faster R-CNN returns a loss dict ONLY in train mode.
+          model.train() here is required to access losses, NOT to affect
+          BatchNorm/Dropout behavior — torch.no_grad() prevents any updates.
+          After loss computation, model is switched to eval mode for mAP.
         """
-        # ── Validation loss (model in train mode to get loss dict) ─────
         self.model.train()
         val_accum = {k: 0.0 for k in ["total_loss"] + self.LOSS_KEYS}
 
         with torch.no_grad():
             for images, targets in self.val_loader:
-                images = [img.to(self.device) for img in images]
-                targets = [
-                    {k: v.to(self.device) for k, v in t.items()} for t in targets
-                ]
-                loss_dict = self.model(images, targets)
+                images  = [img.to(self.device) for img in images]
+                targets = [{k: v.to(self.device) for k, v in t.items()} for t in targets]
+                loss_dict  = self.model(images, targets)
                 total_loss = sum(v for v in loss_dict.values())
                 val_accum["total_loss"] += total_loss.item()
                 for k in self.LOSS_KEYS:
@@ -477,7 +536,6 @@ class Trainer:
         n = max(len(self.val_loader), 1)
         val_losses = {k: v / n for k, v in val_accum.items()}
 
-        # ── Validation mAP (model in eval mode) ───────────────────────
         evaluator = COCOEvaluator(self.device, self.cfg.eval)
         evaluator.evaluate(self.model, self.val_loader)
         val_metrics = evaluator.get_metrics()
@@ -485,6 +543,31 @@ class Trainer:
         return val_losses, val_metrics
 
     def _save_history(self):
-        """Persist history dict to JSON."""
         with open(self.history_path, "w") as f:
             json.dump(self.history, f, indent=2)
+
+
+# ===========================================================================
+# MODULE-LEVEL HELPER
+# ===========================================================================
+
+def _normalize_metric_keys(metrics: dict) -> dict:
+    """
+    Normalize COCOEvaluator output to internal standard keys.
+
+    COCOEvaluator may return "map" for mAP@[.5:.95] (torchmetrics default).
+    We rename to "map_50_95" so all downstream code uses a single key.
+
+    Input keys handled:
+      "map"     → "map_50_95"
+      "map_50"  → unchanged
+      "map_75"  → unchanged
+      all others → unchanged
+    """
+    normalized = {}
+    for k, v in metrics.items():
+        if k == "map":
+            normalized["map_50_95"] = v   # primary rename
+        else:
+            normalized[k] = v
+    return normalized

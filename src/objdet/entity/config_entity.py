@@ -71,6 +71,9 @@ class TrainingConfig:
     lr_gamma: float = 0.1
     grad_clip: Optional[float] = None
     device: str = "cuda"
+    amp: bool = False                # AMP stub — not yet used in trainer
+    accumulation_steps: int = 1      # gradient accumulation stub
+
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +107,7 @@ class EvalConfig:
 class CheckpointingConfig:
     save_dir: str = "outputs/checkpoints/"
     save_every: int = 2
+    validate_every: int = 1
     keep_last: int = 3
     save_path: Path = field(default_factory=Path, init=False)
 

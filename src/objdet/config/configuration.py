@@ -95,6 +95,8 @@ class ConfigurationManager:
             lr_gamma=d.get("lr_gamma", 0.1),
             grad_clip=d.get("grad_clip", None),
             device=d.get("device", "cuda"),
+            amp=d.get("amp", False),
+            accumulation_steps=d.get("accumulation_steps", 1),
         )
 
     @staticmethod
@@ -122,6 +124,7 @@ class ConfigurationManager:
         return CheckpointingConfig(
             save_dir=d.get("save_dir", "outputs/checkpoints/"),
             save_every=d.get("save_every", 2),
+            validate_every=d.get("validate_every", 1), 
             keep_last=d.get("keep_last", 3),
         )
 
