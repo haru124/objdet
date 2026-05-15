@@ -51,22 +51,21 @@ from objdet.tracking.mlflow_logger import MLflowLogger
 # ===========================================================================
 # ENTRY POINT
 # ===========================================================================
-
 def run_inference(
     config_path: str,
     exp_path: str | None,
     ckpt_path: str,
     n_samples: int = 5,
     score_threshold: float = 0.5,
-    output_dir: str = PROJECT_ROOT / "outputs" / "inference",
+    output_dir=PROJECT_ROOT / "outputs" / "inference",
     split: str = "test",
     tb_log_dir: str | None = None,
     mlflow_uri: str | None = None,
     sample_seed: int = 0,
+    # NEW: accept existing open loggers from main.py when chaining
+    existing_mlf_logger=None,
+    existing_tb_logger=None,
 ):
-    """
-    Full inference pipeline. Call from script or import directly.
-    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     viz_dir = output_dir / "visualizations"
@@ -74,22 +73,44 @@ def run_inference(
     plot_dir = output_dir / "plots"
     plot_dir.mkdir(exist_ok=True)
 
-    # ── 1. Config & device ─────────────────────────────────────────────────
     cfg = ConfigurationManager(
         base_config_path=config_path,
         experiment_config_path=exp_path,
     ).get_config()
 
-    tb_logger = TensorBoardLogger(
-        log_dir=tb_log_dir or cfg.logging.tensorboard_dir,
-        experiment_name=cfg.experiment_name,
-    ) if tb_log_dir or cfg.logging.tensorboard_dir else None
+    # ── Use existing loggers if passed (chained from training) ────────
+    # This makes train + test metrics appear in the SAME MLflow run
+    # and the SAME TensorBoard run.
+    # If running standalone inference, create new loggers.
+      # ── Logger ownership ──────────────────────────────────────────────
+    # Rule: whoever creates the logger, closes it.
+    #
+    # Scenario A — chained from training (existing_* is not None):
+    #   main.py created the loggers and will close them after this
+    #   function returns. We must NOT close them here.
+    #
+    # Scenario B — standalone inference (existing_* is None):
+    #   We create them here, so we must close them here.
+    #
+    _owns_loggers = existing_mlf_logger is None  # True = we created them, we close them
 
-    mlf_logger = MLflowLogger(
-        tracking_uri=mlflow_uri or cfg.logging.mlflow_tracking_uri,
-        experiment_name=cfg.project_name,
-        run_name=f"{cfg.experiment_name}_inference",
-    ) if True else None
+    if existing_tb_logger is not None:
+        tb_logger = existing_tb_logger
+    else:
+        tb_logger = TensorBoardLogger(
+            log_dir=tb_log_dir or cfg.logging.tensorboard_dir,
+            experiment_name=cfg.experiment_name,
+            run_type="inference",  # separate subfolder from training
+        ) if (tb_log_dir or cfg.logging.tensorboard_dir) else None
+
+    if existing_mlf_logger is not None:
+        mlf_logger = existing_mlf_logger
+    else:
+        mlf_logger = MLflowLogger(
+            tracking_uri=mlflow_uri or cfg.logging.mlflow_tracking_uri,
+            experiment_name=cfg.project_name,
+            run_name=cfg.experiment_name,  # same name → resumes or creates
+        )
 
     device = torch.device(
         cfg.training.device if torch.cuda.is_available() else "cpu"
@@ -143,6 +164,14 @@ def run_inference(
 
     _log_test_results_to_tensorboard(tb_logger, inf_losses, inf_metrics)
     _log_test_results_to_mlflow(mlf_logger, inf_losses, inf_metrics)
+
+    # ── Only close loggers if we created them (standalone inference) ──
+    if _owns_loggers:
+        if tb_logger:
+            tb_logger.close()
+        if mlf_logger:
+            mlf_logger.end_run()
+
 
     # ── 6. Visualize sample images ─────────────────────────────────────────
     print(f"\n{'─'*40}")
@@ -286,7 +315,8 @@ def _log_test_results_to_mlflow(mlf_logger, inf_losses, inf_metrics):
         metrics[f"test_ap_{cls_name}"] = ap_val
 
     mlf_logger.log_metrics(metrics, step=0)
-    mlf_logger.end_run()
+    #mlf_logger.end_run() 
+    #NOTE: do NOT call mlf_logger.end_run() here — caller owns lifecycle
     print("[MLflow] Test results logged.")
 
 

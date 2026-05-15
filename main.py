@@ -144,11 +144,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Late imports — only load what the mode needs.
-    # This keeps startup time low and avoids importing matplotlib/torch
-    # unnecessarily when you just want --help.
     from objdet.config.configuration import ConfigurationManager
-    from objdet.utils.common import set_seed, get_device
+    from objdet.utils.common import set_seed
 
     cfg = ConfigurationManager(
         base_config_path=args.config,
@@ -156,20 +153,26 @@ def main():
     ).get_config()
 
     set_seed(args.seed)
-
     _print_header(cfg, args)
 
-    # ── Route to the right pipeline ─────────────────────────────────────────
-
     if args.mode == "train":
-        best_ckpt = _run_train(args, cfg)
+        best_ckpt, mlf_logger, tb_logger = _run_train(args, cfg)
 
-        # Optionally chain inference after training
         if args.run_inference_after:
             print("\n" + "="*65)
-            print("  --run-inference-after: launching inference on best checkpoint")
+            print("  --run-inference-after: launching inference (same MLflow run)")
             print("="*65)
-            _run_inference(args, cfg, ckpt_override=best_ckpt)
+            try:
+                _run_inference(
+                    args, cfg,
+                    ckpt_override=best_ckpt,
+                    mlf_logger=mlf_logger,    # same open run
+                    tb_logger=tb_logger,
+                )
+            finally:
+                # Now close everything — after both train AND inference done
+                tb_logger.close()
+                mlf_logger.end_run()
 
     elif args.mode == "inference":
         _run_inference(args, cfg)
@@ -180,17 +183,17 @@ def main():
     if args.save_backbone and args.ckpt:
         _save_backbone(args, cfg)
 
-
 # ===========================================================================
 # PIPELINE RUNNERS
 # Each is a thin wrapper — all real logic lives in its own module.
 # ===========================================================================
 
 
-def _run_train(args, cfg) -> Path:
+def _run_train(args, cfg) -> tuple:
     """
     Run full training loop.
-    Returns the path of the best (latest) checkpoint for optional chaining.
+    Returns (best_ckpt_path, mlf_logger, tb_logger) for optional chaining
+    into inference with the same loggers (same MLflow run, same TB run).
     """
     from objdet.utils.common import get_device, count_parameters, flat_config_dict
     from objdet.datasets.dataloader import build_train_val_loaders
@@ -204,7 +207,6 @@ def _run_train(args, cfg) -> Path:
 
     device = get_device(cfg.training.device)
 
-    # Data
     print("[Train] Building DataLoaders ...")
     train_loader, val_loader = build_train_val_loaders(
         data_cfg=cfg.data,
@@ -213,79 +215,85 @@ def _run_train(args, cfg) -> Path:
     print(f"[Train] Train batches : {len(train_loader)}")
     print(f"[Train] Val batches   : {len(val_loader)}")
 
-    # Model
     print("[Train] Building model ...")
     model = get_model_on_device(cfg.model, device)
     print(f"[Train] Trainable parameters: {count_parameters(model):,}")
-
-    # Patch losses
     patch_roi_head_losses(model, cfg.loss)
 
-    # Loggers
+    # ── Create loggers — ONE run for the entire experiment ────────────
     tb_logger = TensorBoardLogger(
         log_dir=cfg.logging.tensorboard_dir,
         experiment_name=cfg.experiment_name,
+        run_type="train",
     )
     mlf_logger = MLflowLogger(
         tracking_uri=cfg.logging.mlflow_tracking_uri,
         experiment_name=cfg.project_name,
-        run_name=cfg.experiment_name,
-    )
-    mlf_logger.log_params(flat_config_dict(cfg))
-
-    # Trainer
-    trainer = Trainer(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        cfg=cfg,
-        tb_logger=tb_logger,
-        mlf_logger=mlf_logger,
+        run_name=cfg.experiment_name,   # run name = experiment config name
     )
 
-    # Resume — explicit path or auto-detect latest in experiment folder
-    resume_path = args.resume
-    if resume_path is None:
+    best_ckpt = None
+
+    # ── try/finally guarantees end_run() even on crash or Ctrl+C ─────
+    try:
+        mlf_logger.log_params(flat_config_dict(cfg))
+
+        trainer = Trainer(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            cfg=cfg,
+            tb_logger=tb_logger,
+            mlf_logger=mlf_logger,
+        )
+
+        resume_path = args.resume
+        if resume_path is None:
+            exp_ckpt_dir = Path(cfg.checkpointing.save_dir) / cfg.experiment_name
+            latest = get_latest_checkpoint(exp_ckpt_dir)
+            if latest:
+                print(f"[Train] Auto-resuming from: {latest}")
+                resume_path = str(latest)
+
+        if resume_path:
+            trainer.resume(resume_path)
+
+        print("[Train] Starting training ...")
+        with build_profiler(cfg.profiler):
+            trainer.fit()
+
         exp_ckpt_dir = Path(cfg.checkpointing.save_dir) / cfg.experiment_name
-        latest = get_latest_checkpoint(exp_ckpt_dir)
-        if latest:
-            print(f"[Train] Auto-resuming from: {latest}")
-            resume_path = str(latest)
+        best_ckpt = get_latest_checkpoint(exp_ckpt_dir)
+        if best_ckpt:
+            print(f"[Train] Best checkpoint: {best_ckpt}")
 
-    if resume_path:
-        trainer.resume(resume_path)
+        # ── If chaining inference, return loggers open (don't end yet) ─
+        if args.run_inference_after:
+            return best_ckpt, mlf_logger, tb_logger
 
-    # Train
-    print("[Train] Starting training ...")
-    with build_profiler(cfg.profiler):
-        trainer.fit()
+        # ── Otherwise close everything here ───────────────────────────
+    finally:
+        if not args.run_inference_after:
+            tb_logger.close()
+            mlf_logger.end_run()
 
-    tb_logger.close()
-    mlf_logger.end_run()
-
-    # Return path of best checkpoint (latest = last saved)
-    exp_ckpt_dir = Path(cfg.checkpointing.save_dir) / cfg.experiment_name
-    best_ckpt = get_latest_checkpoint(exp_ckpt_dir)
-    if best_ckpt:
-        print(f"[Train] Best checkpoint: {best_ckpt}")
-    return best_ckpt
+    return best_ckpt, mlf_logger, tb_logger
 
 
-def _run_inference(args, cfg, ckpt_override: Path = None):
+def _run_inference(args, cfg, ckpt_override=None, mlf_logger=None, tb_logger=None):
     """
     Run test-set evaluation, visualization, and plotting.
 
-    ckpt_override: used when chaining from _run_train via --run-inference-after.
-                   Bypasses args.ckpt so you don't have to specify it manually.
+    mlf_logger / tb_logger: if passed (from _run_train chaining), reuse the
+    existing open run so train + test metrics live in the same MLflow run.
+    If None (standalone inference mode), create new loggers.
     """
     from objdet.inference.inference import run_inference
     from objdet.utils.checkpoint import get_latest_checkpoint
 
-    # Resolve checkpoint path
     ckpt_path = ckpt_override or args.ckpt
 
     if ckpt_path is None:
-        # Try to auto-detect latest from experiment dir
         exp_ckpt_dir = Path(cfg.checkpointing.save_dir) / cfg.experiment_name
         ckpt_path = get_latest_checkpoint(exp_ckpt_dir)
         if ckpt_path is None:
@@ -295,11 +303,10 @@ def _run_inference(args, cfg, ckpt_override: Path = None):
             )
         print(f"[Inference] Auto-detected checkpoint: {ckpt_path}")
 
-    # Resolve output directory
-    output_dir = args.output_dir or (
-        f"outputs/inference/{cfg.experiment_name}"
-    )
+    output_dir = args.output_dir or f"outputs/inference/{cfg.experiment_name}"
 
+    # Pass existing loggers if available (chained from training)
+    # Otherwise run_inference will create its own
     run_inference(
         config_path=args.config,
         exp_path=args.exp,
@@ -308,8 +315,11 @@ def _run_inference(args, cfg, ckpt_override: Path = None):
         score_threshold=args.score_threshold,
         output_dir=output_dir,
         split=("test" if args.mode == "train" and args.run_inference_after else args.split),
-        tb_log_dir=cfg.logging.tensorboard_dir,     
-        mlflow_uri=cfg.logging.mlflow_tracking_uri, 
+        tb_log_dir=cfg.logging.tensorboard_dir,
+        mlflow_uri=cfg.logging.mlflow_tracking_uri,
+        # Pass existing open loggers for single-run design:
+        existing_mlf_logger=mlf_logger,
+        existing_tb_logger=tb_logger,
     )
 
 
