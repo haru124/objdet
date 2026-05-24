@@ -61,6 +61,12 @@ training:
   # Gradient accumulation — simulate larger batch size without more GPU memory
   # effective_batch = batch_size * accumulation_steps
   accumulation_steps: 1
+  #--- early stopping --- #
+  early_stopping: true
+  early_stopping_patience: 5
+  early_stopping_min_delta: 0.0001
+  early_stopping_metric: "map_50_95"
+
 
 #-----loss
 # faster rcnn has 4 internal losses- rpn classification loss, rpn regression loss, roi head classification loss, roi head regression loss

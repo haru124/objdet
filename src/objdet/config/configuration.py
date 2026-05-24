@@ -97,6 +97,11 @@ class ConfigurationManager:
             device=d.get("device", "cuda"),
             amp=d.get("amp", False),
             accumulation_steps=d.get("accumulation_steps", 1),
+            early_stopping = d.get("early_stopping",True),
+            early_stopping_patience = d.get("early_stopping_patience", 5),
+            early_stopping_min_delta = d.get("early_stopping_min_delta", 0.00001),
+            early_stopping_metric = d.get("early_stopping_metric", "map_50_95"),
+
         )
 
     @staticmethod

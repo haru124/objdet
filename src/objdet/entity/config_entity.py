@@ -73,6 +73,10 @@ class TrainingConfig:
     device: str = "cuda"
     amp: bool = False                # AMP stub — not yet used in trainer
     accumulation_steps: int = 1      # gradient accumulation stub
+    early_stopping: bool = True
+    early_stopping_patience: int = 5
+    early_stopping_min_delta: float = 0.0001
+    early_stopping_metric: str = "map_50_95"
 
 
 

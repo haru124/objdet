@@ -189,6 +189,14 @@ class Trainer:
         # Tie-break: lowest loss (when map_50_95 equal to 4dp)
         self.best_map_50_95 = 0.0
         self.best_loss_at_best_map = float("inf")
+        # Early stopping
+        self.early_stopping = getattr(cfg.training, "early_stopping", False)
+        self.es_patience = getattr(cfg.training, "early_stopping_patience", 5)
+        self.es_min_delta = getattr(cfg.training, "early_stopping_min_delta", 1e-4)
+        self.es_metric = getattr(cfg.training, "early_stopping_metric", "map_50_95")
+
+        self.no_improve_epochs = 0
+        self.best_es_metric = -float("inf")
 
         print(f"[Trainer] Device        : {self.device}")
         print(f"[Trainer] Checkpoints   : {self.ckpt_dir}")
@@ -290,9 +298,45 @@ class Trainer:
                 self.history["val"]["ap_per_class"].append(val_metrics.get("ap_per_class", {}))
                 self.history["val"]["precision"].append(val_metrics.get("precision", 0.0))
                 self.history["val"]["recall"].append(val_metrics.get("recall", 0.0))
+
             else:
                 val_losses  = {"total_loss": float("nan")}
                 val_metrics = {"map_50_95": float("nan")}
+                    # -------------------------------------------------
+            # Early stopping
+            # -------------------------------------------------
+            if self.early_stopping:
+
+                current_metric = val_metrics.get(self.es_metric, 0.0)
+
+                improved = (
+                    current_metric > self.best_es_metric + self.es_min_delta
+                )
+
+                if improved:
+                    self.best_es_metric = current_metric
+                    self.no_improve_epochs = 0
+
+                    print(
+                        f"[EarlyStopping] Improvement detected "
+                        f"({self.es_metric}={current_metric:.4f})"
+                    )
+
+                else:
+                    self.no_improve_epochs += 1
+
+                    print(
+                        f"[EarlyStopping] No improvement for "
+                        f"{self.no_improve_epochs}/{self.es_patience} epochs"
+                    )
+
+                    if self.no_improve_epochs >= self.es_patience:
+                        print(
+                            f"\n[EarlyStopping] Triggered. "
+                            f"No improvement in {self.es_patience} epochs."
+                        )
+                        break
+
 
             # ── LR scheduler step ──────────────────────────────────────
             self._scheduler_step(val_metrics.get("map_50_95") if run_val else None)
