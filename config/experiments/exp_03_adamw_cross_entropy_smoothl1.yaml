@@ -5,7 +5,7 @@
 experiment_name: exp_03_adamw_cross_entropy_smoothl1
 
 training:
-  epochs: 10
+  epochs: 30
   batch_size: 4
   optimizer: "adamw"
   learning_rate: 0.0001

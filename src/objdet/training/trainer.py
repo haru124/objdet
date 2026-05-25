@@ -234,12 +234,21 @@ class Trainer:
         )
         self.global_step = self.start_epoch * len(self.train_loader)
 
-        if self.history_path.exists():
+        if self.history_path.exists():        
             with open(self.history_path, "r") as f:
                 self.history = json.load(f)
-            # Restore best map seen so far so we don't re-save inferior checkpoints
-            val_maps = self.history.get("val", {}).get("map_50_95", [])
-            val_losses = self.history.get("val", {}).get("total_loss", [])
+
+            # backward compatibility for old history files
+            val_hist = self.history.setdefault("val", {})
+
+            if "map_50_95" not in val_hist:
+                val_hist["map_50_95"] = val_hist.pop("map", [])
+
+            # Restore best map seen so far
+            val_maps = val_hist.get("map_50_95", [])
+            val_losses = val_hist.get("total_loss", [])
+
+
             if val_maps:
                 self.best_map_50_95 = max(val_maps)
                 # Find loss at that best epoch

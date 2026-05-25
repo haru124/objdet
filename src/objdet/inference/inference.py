@@ -283,7 +283,7 @@ def _log_test_results_to_tensorboard(tb_logger, inf_losses, inf_metrics):
     tb_logger.log_scalar("test/loss_obj",      inf_losses["loss_objectness"],  0)
     tb_logger.log_scalar("test/loss_rpn_box",  inf_losses["loss_rpn_box_reg"], 0)
 
-    tb_logger.log_scalar("test/mAP[.5:.95]",   inf_metrics["map"],       0)
+    tb_logger.log_scalar("test/mAP[.5:.95]",   inf_metrics["map_50_95"],       0)
     tb_logger.log_scalar("test/mAP@0.50",       inf_metrics["map_50"],    0)
     tb_logger.log_scalar("test/mAP@0.75",       inf_metrics["map_75"],    0)
     tb_logger.log_scalar("test/precision",      inf_metrics["precision"], 0)
@@ -305,7 +305,7 @@ def _log_test_results_to_mlflow(mlf_logger, inf_losses, inf_metrics):
         "test_loss_box_reg":  inf_losses["loss_box_reg"],
         "test_loss_obj":      inf_losses["loss_objectness"],
         "test_loss_rpn_box":  inf_losses["loss_rpn_box_reg"],
-        "test_mAP_5_95":      inf_metrics["map"],
+        "test_mAP_5_95":      inf_metrics["map_50_95"],
         "test_mAP_50":        inf_metrics["map_50"],
         "test_mAP_75":        inf_metrics["map_75"],
         "test_precision":     inf_metrics["precision"],
@@ -362,9 +362,9 @@ def _visualize_samples(
             pred = predictions[0]
 
         img_id = target["image_id"].item()
-        print(f"\n{'='*65}")
-        print(f"  Sample {sample_idx} / {n_samples}   (image_id={img_id})")
-        print(f"{'='*65}")
+        #print(f"\n{'='*65}")
+        #print(f"  Sample {sample_idx} / {n_samples}   (image_id={img_id})")
+        #print(f"{'='*65}")
 
         gt_boxes  = target["boxes"].cpu()
         gt_labels = target["labels"].cpu()
@@ -379,11 +379,11 @@ def _visualize_samples(
         pred_scores_filt = pred_scores[keep]
 
         # Print coordinates
-        _print_boxes("GROUND TRUTH", gt_boxes, gt_labels, scores=None)
-        _print_boxes(
-            "PREDICTIONS (filtered)", pred_boxes_filt,
-            pred_labels_filt, pred_scores_filt
-        )
+        #_print_boxes("GROUND TRUTH", gt_boxes, gt_labels, scores=None)
+        #_print_boxes(
+            #"PREDICTIONS (filtered)", pred_boxes_filt,
+            #pred_labels_filt, pred_scores_filt
+        #)
 
         # Save side-by-side figure
         save_path = viz_dir / f"sample_{sample_idx:03d}_imgid_{img_id}.png"
@@ -524,7 +524,7 @@ def _plot_map_curves(history: dict, inf_metrics: dict, plot_dir: Path):
     fig.suptitle("mAP Curves — Validation & Test", fontsize=14, fontweight="bold")
 
     map_styles = {
-        "map":    {"color": "#2c3e50", "lw": 2.5, "label": "mAP@[.5:.95]"},
+        "map_50_95":    {"color": "#2c3e50", "lw": 2.5, "label": "mAP@[.5:.95]"},
         "map_50": {"color": "#e74c3c", "lw": 1.8, "label": "mAP@0.50"},
         "map_75": {"color": "#3498db", "lw": 1.8, "label": "mAP@0.75"},
     }
@@ -548,7 +548,7 @@ def _plot_map_curves(history: dict, inf_metrics: dict, plot_dir: Path):
     ax = axes[1]
     ax.set_title("Test mAP", fontsize=12)
     metric_names = ["mAP@[.5:.95]", "mAP@0.50", "mAP@0.75"]
-    metric_keys  = ["map", "map_50", "map_75"]
+    metric_keys  = ["map_50_95", "map_50", "map_75"]
     colors       = ["#2c3e50", "#e74c3c", "#3498db"]
     values       = [inf_metrics.get(k, 0.0) for k in metric_keys]
 
@@ -695,7 +695,7 @@ def _print_losses(split: str, losses: dict):
 def _print_metrics(split: str, metrics: dict):
     print(f"\n  {split} METRICS")
     print(f"  {'─'*40}")
-    print(f"  mAP@[.5:.95]  : {metrics.get('map',    0):.6f}")
+    print(f"  mAP@[.5:.95]  : {metrics.get('map_50_95',    0):.6f}")
     print(f"  mAP@0.50      : {metrics.get('map_50', 0):.6f}")
     print(f"  mAP@0.75      : {metrics.get('map_75', 0):.6f}")
     print(f"  Precision@0.5 : {metrics.get('precision', 0):.6f}")

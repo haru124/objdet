@@ -58,7 +58,7 @@ class COCOEvaluator:
         """
         Returns:
         {
-            "map":          float   mAP@[0.5:0.95]
+            "map_50_95":          float   mAP@[0.5:0.95]
             "map_50":       float   mAP@0.5
             "map_75":       float   mAP@0.75
             "ap_per_class": {class_name: float}   AP@0.5 per class
@@ -92,7 +92,7 @@ class COCOEvaluator:
         precision, recall = self._mean_precision_recall_at_iou(0.5)
 
         return {
-            "map":          sum(ap_per_thresh) / len(ap_per_thresh),
+            "map_50_95":          sum(ap_per_thresh) / len(ap_per_thresh),
             "map_50":       _at(0.50),
             "map_75":       _at(0.75),
             "ap_per_class": ap_per_class,
