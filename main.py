@@ -26,6 +26,8 @@ Usage examples:
       --ckpt outputs/checkpoints/exp_01_smoke_test/exp_01_epoch_0020_loss_0.8231.pth \
       --onnx outputs/model_export/model.onnx
 
+      python main.py --mode export --ckpt outputs/checkpoints/exp_03_adamw_cross_entropy_smoothl1/best_exp_03_adamw_cross_entropy_smoothl1_loss_0.5693_map50-95_0.3204.pth --onnx outputs/onnx/adamw_ce_smoothl1/model.onnx  
+
   # Inference can also be run directly (bypassing main.py entirely):
   python -m objdet.inference.inference \
       --ckpt outputs/checkpoints/exp_01_smoke_test/... \

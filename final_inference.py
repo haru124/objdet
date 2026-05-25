@@ -19,7 +19,7 @@ Usage:
       --onnx  outputs/model_export/exp_01.onnx \\
       --exp   config/experiments/exp_01_sgd_cross_entropy_smoothl1.yaml \\
       --image path/to/any/image.jpg \\
-      --runs  50
+      --runs  10
 """
 
 import argparse
@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
+import onnx
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -61,7 +62,7 @@ def print_model_size(ckpt_path: str | Path, onnx_path: str | Path | None):
     print()
 
 
-def print_param_counts(model: torch.nn.Module):
+def print_param_counts(model: torch.nn.Module, onnx_path: str | Path | None):
     """
     Print parameter counts:
       - Total / Trainable / Frozen
@@ -85,6 +86,21 @@ def print_param_counts(model: torch.nn.Module):
     print(f"  Total parameters      : {total:>12,}")
     print(f"  Trainable (grad=True) : {trainable:>12,}  ← updated during training")
     print(f"  Frozen    (grad=False): {frozen:>12,}  ← fixed (backbone layers)")
+
+    if onnx_path:
+        o = Path(onnx_path)
+        if o.exists():
+            onnx_model  = onnx.load(o)
+            onnx_total  = 0
+            for init in onnx_model.graph.initializer:
+                count = 1
+                for dim in init.dims:
+                    count *= dim
+                onnx_total += count
+            print(f"\n  ONNX Model: Total parameters      : {onnx_total:>12,}\n")
+        else:
+            print(f"  ONNX model                : NOT FOUND at {onnx_path}")
+
 
     # ── Per-component breakdown ───────────────────────────────────────
     print(f"\n  {'Component':<30} {'Params':>12}  {'Trainable':>12}")
@@ -140,12 +156,50 @@ def load_image_as_tensor(image_path: str, device: torch.device) -> torch.Tensor:
     return tensor.to(device)
 
 
-def load_image_as_numpy(image_path: str) -> np.ndarray:
-    """Load image as [1, C, H, W] float32 numpy array for ONNX Runtime."""
-    img = Image.open(image_path).convert("RGB")
-    arr = np.array(img, dtype=np.float32) / 255.0    # HWC
-    arr = arr.transpose(2, 0, 1)[np.newaxis, ...]     # 1CHW
+def load_image_as_numpy_preprocess_for_onnx(img):
+    img = Image.open(img).convert("RGB")
+
+    w, h = img.size
+
+    min_size = 800
+    max_size = 1333
+
+    # scale like Faster R-CNN
+    scale = min_size / min(h, w)
+    if max(h, w) * scale > max_size:
+        scale = max_size / max(h, w)
+
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+
+    img = img.resize((new_w, new_h))
+
+    arr = np.array(img, dtype=np.float32) / 255.0  # HWC, [0,1]
+
+    # HWC -> CHW
+    arr = arr.transpose(2, 0, 1)
+
+        # pad to 800 x 1333
+    _, h, w = arr.shape
+
+    pad_h = 800 - h
+    pad_w = 1333 - w
+
+    arr = np.pad(
+        arr,
+        ((0, 0), (0, pad_h), (0, pad_w)),
+        mode="constant",
+        constant_values=0
+    )
+
+    # ImageNet normalization (same as torchvision Faster R-CNN backbone)
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+
+    arr = (arr - mean) / std
+
     return arr
+
 
 
 # ===========================================================================
@@ -292,8 +346,8 @@ def main():
         help="Path to a single image file (.jpg/.png) to use for timing.",
     )
     parser.add_argument(
-        "--runs", type=int, default=50,
-        help="Number of timed forward passes per mode (default: 50).",
+        "--runs", type=int, default=10,
+        help="Number of timed forward passes per mode (default: 10).",
     )
     parser.add_argument(
         "--score-threshold", type=float, default=0.5,
@@ -333,10 +387,10 @@ def main():
     load_checkpoint(args.ckpt, model_cpu, map_location="cpu")
     model_cpu.eval()
 
-    print_param_counts(model_cpu)
+    print_param_counts(model_cpu, args.onnx)
 
     # ── Load image ────────────────────────────────────────────────────
-    image_numpy = load_image_as_numpy(args.image)   # for ONNX
+    image_numpy = load_image_as_numpy_preprocess_for_onnx(args.image)   # for ONNX
     image_cpu   = load_image_as_tensor(args.image, cpu_device)
 
     timing_results = []
@@ -362,6 +416,7 @@ def main():
     if torch.cuda.is_available():
         gpu_device = torch.device("cuda")
         model_gpu = build_faster_rcnn(cfg.model)
+        model_gpu.to(gpu_device)
         load_checkpoint(args.ckpt, model_gpu, map_location="cuda")
         model_gpu.eval()
         image_gpu = load_image_as_tensor(args.image, gpu_device)
