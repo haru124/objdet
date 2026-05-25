@@ -112,6 +112,7 @@ class ConfigurationManager:
             focal_alpha=d.get("focal_alpha", 0.25),
             focal_gamma=d.get("focal_gamma", 2.0),
             smooth_l1_beta=d.get("smooth_l1_beta", 1.0),
+            cls_weights=d.get("cls_weights", None),
         )
 
     @staticmethod

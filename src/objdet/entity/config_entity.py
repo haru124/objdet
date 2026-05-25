@@ -90,6 +90,8 @@ class LossConfig:
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
     smooth_l1_beta: float = 1.0
+    cls_weights: Optional[List] = None
+
 
 
 # ---------------------------------------------------------------------------

@@ -262,12 +262,31 @@ def build_cls_loss_fn(loss_cfg: LossConfig):
             return focal_loss_fn(class_logits, labels, alpha=alpha, gamma=gamma)
 
         return _focal
+    
+    elif loss_cfg.classification == "weighted_cross_entropy":
+        # Weights: one per class (index 0 = background)
+        # Background weight should be low (< 1.0) to avoid penalizing
+        # the dominant class too heavily
+        weights = getattr(loss_cfg, "cls_weights", None)
+        if weights is None:
+            raise ValueError(
+                "LossConfig.cls_weights must be set for weighted_cross_entropy. "
+                "Provide one weight per class including background (index 0)."
+            )
+        weights_tensor = torch.tensor(weights, dtype=torch.float32)
+
+        def _wce(class_logits, labels):
+            w = weights_tensor.to(class_logits.device)
+            return F.cross_entropy(class_logits, labels, weight=w)
+
+        return _wce
 
     else:
         raise ValueError(
             f"Unknown classification loss: '{loss_cfg.classification}'. "
-            "Choose: 'cross_entropy' | 'focal'."
+            "Choose: 'cross_entropy' | 'focal' | 'weighted_cross_entropy'."
         )
+
 
 
 def build_box_loss_fn(loss_cfg: LossConfig):
