@@ -71,21 +71,60 @@ def build_optimizer(model, training_cfg):
 
 
 def build_scheduler(optimizer, training_cfg):
-    from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR, ConstantLR
+    from torch.optim.lr_scheduler import (
+        StepLR, CosineAnnealingLR, ConstantLR,
+        LinearLR, SequentialLR, ReduceLROnPlateau,
+    )
     name = training_cfg.lr_scheduler.lower()
+
     if name == "step":
-        return StepLR(optimizer,
-                      step_size=training_cfg.lr_step_size,
-                      gamma=training_cfg.lr_gamma)
+        return StepLR(
+            optimizer,
+            step_size=training_cfg.lr_step_size,
+            gamma=training_cfg.lr_gamma,
+        )
+
     elif name == "cosine":
-        return CosineAnnealingLR(optimizer,
-                                 T_max=training_cfg.epochs,
-                                 eta_min=training_cfg.learning_rate * 0.01)
+        return CosineAnnealingLR(
+            optimizer,
+            T_max=training_cfg.epochs,
+            eta_min=training_cfg.learning_rate * 0.001,  # fixed: was 0.01
+        )
+
+    elif name == "cosine_warmup":
+        warmup_epochs = getattr(training_cfg, "warmup_epochs", 3)
+        warmup = LinearLR(
+            optimizer,
+            start_factor=0.1,
+            end_factor=1.0,
+            total_iters=warmup_epochs,
+        )
+        cosine = CosineAnnealingLR(
+            optimizer,
+            T_max=training_cfg.epochs - warmup_epochs,
+            eta_min=training_cfg.learning_rate * 0.001,
+        )
+        return SequentialLR(
+            optimizer,
+            schedulers=[warmup, cosine],
+            milestones=[warmup_epochs],
+        )
+
+    elif name == "plateau":
+        return ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=getattr(training_cfg, "plateau_factor",   0.5),
+            patience=getattr(training_cfg, "plateau_patience", 5),
+            min_lr=training_cfg.learning_rate * 0.001,
+        )
+
     elif name == "none":
         return ConstantLR(optimizer, factor=1.0, total_iters=0)
+
     else:
         raise ValueError(f"Unknown scheduler: {name}")
-
+    
 
 class Trainer:
     """

@@ -93,6 +93,7 @@ class ConfigurationManager:
             lr_scheduler=d.get("lr_scheduler", "step"),
             lr_step_size=d.get("lr_step_size", 7),
             lr_gamma=d.get("lr_gamma", 0.1),
+            warmup = d.get("warmup", 0),
             grad_clip=d.get("grad_clip", None),
             device=d.get("device", "cuda"),
             amp=d.get("amp", False),

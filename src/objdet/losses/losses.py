@@ -452,6 +452,10 @@ class CustomRoIHeads(RoIHeads):
             pred_boxes   = self.box_coder.decode(box_regression_pos,      proposals_pos)
             target_boxes = self.box_coder.decode(regression_targets_pos,  proposals_pos)
 
+            # Squeeze [N,1,4] → [N,4] if torchvision returns extra dim
+            pred_boxes   = pred_boxes.squeeze(1) if pred_boxes.dim() == 3 else pred_boxes    # [N,4]
+            target_boxes = target_boxes.squeeze(1) if target_boxes.dim() == 3 else target_boxes  # [N,4]
+
             # Clamp to valid range (decoding can produce negative coords)
             pred_boxes   = pred_boxes.clamp(min=0)
             target_boxes = target_boxes.clamp(min=0)

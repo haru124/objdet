@@ -69,6 +69,7 @@ class TrainingConfig:
     lr_scheduler: str = "step"          # "step" | "cosine" | "none"
     lr_step_size: int = 7
     lr_gamma: float = 0.1
+    warmup: int = 0
     grad_clip: Optional[float] = None
     device: str = "cuda"
     amp: bool = False                # AMP stub — not yet used in trainer

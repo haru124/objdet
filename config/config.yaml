@@ -49,6 +49,7 @@ training:
   lr_scheduler: "step"                # "step" | "cosine" | "none"
   lr_step_size: 7                    # StepLR: decay every N epochs
   lr_gamma: 0.1            # StepLR: decay factor (new_lr = old_lr * gamma)-- after 7 epochs, lr = lr*0.1, after 7 epochs, lrnew = lr*0.1
+  warmup: 0
   
   #------gradient clipping------
   grad_clip: null                    # Optional gradient clipping value, when grad norm exceeds this value, it is scaled down to prevent exploding gradients, all gradients will be scaled down by the same factor(grad norm/clip_value) to maintain their relative magnitudes
