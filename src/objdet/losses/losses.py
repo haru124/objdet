@@ -267,10 +267,10 @@ def build_cls_loss_fn(loss_cfg: LossConfig):
         # Weights: one per class (index 0 = background)
         # Background weight should be low (< 1.0) to avoid penalizing
         # the dominant class too heavily
-        weights = getattr(loss_cfg, "cls_weights", None)
+        weights = getattr(loss_cfg, "weights", None)
         if weights is None:
             raise ValueError(
-                "LossConfig.cls_weights must be set for weighted_cross_entropy. "
+                "LossConfig.weights must be set for weighted_cross_entropy. "
                 "Provide one weight per class including background (index 0)."
             )
         weights_tensor = torch.tensor(weights, dtype=torch.float32)
@@ -449,9 +449,11 @@ class CustomRoIHeads(RoIHeads):
             proposals_flat = torch.cat(proposals, dim=0)
             proposals_pos  = proposals_flat[sampled_pos_inds]              # [N_pos, 4]
 
-            pred_boxes   = self.box_coder.decode(box_regression_pos,      proposals_pos)
-            target_boxes = self.box_coder.decode(regression_targets_pos,  proposals_pos)
+            # BoxCoder.decode() requires boxes as List[Tensor], not raw Tensor
+            pred_boxes   = self.box_coder.decode(box_regression_pos,     [proposals_pos])  # ← list
+            target_boxes = self.box_coder.decode(regression_targets_pos, [proposals_pos])  # ← list
 
+            # decode() returns [N_pos, 1, 4] when given a list — squeeze the middle dim
             # Squeeze [N,1,4] → [N,4] if torchvision returns extra dim
             pred_boxes   = pred_boxes.squeeze(1) if pred_boxes.dim() == 3 else pred_boxes    # [N,4]
             target_boxes = target_boxes.squeeze(1) if target_boxes.dim() == 3 else target_boxes  # [N,4]

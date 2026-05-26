@@ -11,25 +11,41 @@ data:
   num_workers: 2
 
 training:
-  epochs: 2
+  epochs: 4
   batch_size: 2
-  optimizer: "sgd"
+  optimizer: "adamw"
   learning_rate: 0.002
+  momentum: 0.0                    # Momentum for SGD optimizer wt = wt-1 + lr*momentum, momentum vt = bvt-1 + gt
+  weight_decay: 0.0005        # wt = wt - lr*weight_decay*wt -- creates same effect as L2 regularization in SGD to prevent overfitting, so no need to add L2 regularization term in loss function
+  
+  #------learning rate scheduler hyperparameters------
+  lr_scheduler: "cosine_warmup"                # "step" | "cosine" | "none" | "cosine_warmup"
+  warmup: 1
 
 
 model:
   backbone_weights: "local"
   local_weights_path: "weights/fasterrcnn_resnet50_fpn_coco.pth"
   load_backbone_only: false
-  trainable_backbone_layers: 1
+  trainable_backbone_layers: 2
 
 loss:
-  classification: "cross_entropy"
-  box_regression: "smooth_l1"
+  classification: "weighted_cross_entropy"
+  weights: [0.1,1,1,0.5,1,1,1,1,1]     #CITYSCAPES_CLASSES = [ "__background__",   # 0
+   # "person",           # 1
+    #"rider",            # 2
+    #"car",              # 3
+    #"truck",            # 4
+    #"bus",              # 5
+    #"motorcycle",       # 6
+    #"bicycle",          # 7
+    #"train",            # 8
+#]
+  box_regression: "giou"
 
 checkpointing:
   save_every: 1
-  keep_last: 2
+  keep_last: 3
 
 logging:
   log_every: 10             # log more frequently since fewer batches

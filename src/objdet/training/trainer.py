@@ -78,6 +78,7 @@ def build_scheduler(optimizer, training_cfg):
     name = training_cfg.lr_scheduler.lower()
 
     if name == "step":
+        print(f"[Scheduler] StepLR | step_size={training_cfg.lr_step_size} | gamma={training_cfg.lr_gamma}")
         return StepLR(
             optimizer,
             step_size=training_cfg.lr_step_size,
@@ -85,6 +86,7 @@ def build_scheduler(optimizer, training_cfg):
         )
 
     elif name == "cosine":
+        print(f"[Scheduler] CosineAnnealingLR | T_max={training_cfg.epochs} | eta_min={training_cfg.learning_rate * 0.001:.2e}")
         return CosineAnnealingLR(
             optimizer,
             T_max=training_cfg.epochs,
@@ -92,7 +94,16 @@ def build_scheduler(optimizer, training_cfg):
         )
 
     elif name == "cosine_warmup":
-        warmup_epochs = getattr(training_cfg, "warmup_epochs", 3)
+        warmup_epochs = getattr(training_cfg, "warmup", 3)
+        cosine_epochs = training_cfg.epochs - warmup_epochs
+        print(
+            f"[Scheduler] SequentialLR (LinearWarmup → CosineAnnealing) | "
+            f"total_epochs={training_cfg.epochs} | "
+            f"warmup_epochs={warmup_epochs} "
+            f"(lr: {training_cfg.learning_rate * 0.1:.2e} → {training_cfg.learning_rate:.2e}) | "
+            f"cosine_epochs={cosine_epochs} "
+            f"(lr: {training_cfg.learning_rate:.2e} → {training_cfg.learning_rate * 0.001:.2e})"
+        )
         warmup = LinearLR(
             optimizer,
             start_factor=0.1,
@@ -111,6 +122,7 @@ def build_scheduler(optimizer, training_cfg):
         )
 
     elif name == "plateau":
+        print(f"[Scheduler] ReduceLROnPlateau | mode=max | factor={getattr(training_cfg, 'plateau_factor', 0.5)} | patience={getattr(training_cfg, 'plateau_patience', 5)}")
         return ReduceLROnPlateau(
             optimizer,
             mode="max",
@@ -120,6 +132,7 @@ def build_scheduler(optimizer, training_cfg):
         )
 
     elif name == "none":
+        print("[Scheduler] ConstantLR | lr held fixed throughout training")
         return ConstantLR(optimizer, factor=1.0, total_iters=0)
 
     else:

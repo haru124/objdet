@@ -109,11 +109,11 @@ class ConfigurationManager:
     def _loss_config(d: dict) -> LossConfig:
         return LossConfig(
             classification=d.get("classification", "cross_entropy"),
+            weights = d.get("weights",None),
             box_regression=d.get("box_regression", "smooth_l1"),
             focal_alpha=d.get("focal_alpha", 0.25),
             focal_gamma=d.get("focal_gamma", 2.0),
             smooth_l1_beta=d.get("smooth_l1_beta", 1.0),
-            cls_weights=d.get("cls_weights", None),
         )
 
     @staticmethod

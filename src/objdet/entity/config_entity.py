@@ -87,11 +87,11 @@ class TrainingConfig:
 @dataclass
 class LossConfig:
     classification: str = "cross_entropy"   # "cross_entropy" | "focal"
+    weights: Optional[List] = None
     box_regression: str = "smooth_l1"       # "smooth_l1" | "l1" | "giou" | "diou" | "ciou"
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
     smooth_l1_beta: float = 1.0
-    cls_weights: Optional[List] = None
 
 
 

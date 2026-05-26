@@ -250,6 +250,7 @@ def _run_train(args, cfg) -> tuple:
         )
 
         resume_path = args.resume
+            
         if resume_path is None:
             exp_ckpt_dir = Path(cfg.checkpointing.save_dir) / cfg.experiment_name
             latest = get_latest_checkpoint(exp_ckpt_dir)
@@ -257,7 +258,7 @@ def _run_train(args, cfg) -> tuple:
                 print(f"[Train] Auto-resuming from: {latest}")
                 resume_path = str(latest)
 
-        if resume_path:
+        if resume_path and resume_path!= "no":
             trainer.resume(resume_path)
 
         print("[Train] Starting training ...")
